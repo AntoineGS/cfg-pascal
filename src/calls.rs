@@ -72,9 +72,11 @@ pub const TRANSACTION_METHODS: &[TransactionMethodEntry] = &[
     TransactionMethodEntry { type_name: "TRest", method_name: "TransactionBegin", op: TransactionOp::Start },
     TransactionMethodEntry { type_name: "TRest", method_name: "Commit", op: TransactionOp::Commit },
     TransactionMethodEntry { type_name: "TRest", method_name: "RollbackTrans", op: TransactionOp::Rollback },
+    TransactionMethodEntry { type_name: "TRest", method_name: "InTransaction", op: TransactionOp::InTransaction },
     TransactionMethodEntry { type_name: "IRestOrm", method_name: "TransactionBegin", op: TransactionOp::Start },
     TransactionMethodEntry { type_name: "IRestOrm", method_name: "Commit", op: TransactionOp::Commit },
     TransactionMethodEntry { type_name: "IRestOrm", method_name: "RollbackTrans", op: TransactionOp::Rollback },
+    TransactionMethodEntry { type_name: "IRestOrm", method_name: "InTransaction", op: TransactionOp::InTransaction },
 ];
 
 /// Find all dictionary entries matching a method name (case-insensitive).

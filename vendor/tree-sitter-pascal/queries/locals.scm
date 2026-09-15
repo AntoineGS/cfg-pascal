@@ -16,11 +16,13 @@
 (declVar          name: (identifier)     @local.definition)
 (declConst        name: (identifier)     @local.definition)
 (declLabel        name: (identifier)     @local.definition)
+(declLabel        name: (labelNumber)    @local.definition)
 (genericArg       name: (identifier)     @local.definition)
 (declEnumValue    name: (identifier)     @local.definition)
 (declType         name: (identifier)     @local.definition)
 (declType         name: (genericTpl entity: (identifier)     @local.definition))
 
 (declProc         name: (identifier)     @local.definition)
+(goto             (labelNumber)          @local.reference)
 
 (identifier)                             @local.reference

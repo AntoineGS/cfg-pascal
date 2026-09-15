@@ -35,10 +35,6 @@ use crate::constructs::{
 /// No main CFG is emitted for a body-less library, and no unit section CFG is
 /// emitted when the corresponding section is absent.
 ///
-/// The pinned `tree-sitter-pascal` 0.10.2 grammar does not parse numeric labels
-/// or the legacy unit `begin..end` initialization form cleanly. Those valid
-/// Pascal forms produce an `ERROR` root in that parser and are outside this
-/// builder's supported parse-clean input.
 pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
     let root = tree.root_node();
     let mut cfgs = Vec::new();
@@ -238,7 +234,7 @@ fn collect_label_scopes(
     }
 
     if node.kind() == "label" {
-        if let Some(identifier) = direct_child(node, "identifier") {
+        if let Some(identifier) = label_name_node(node) {
             labels.insert(
                 normalize_label_name(node_text(identifier, source)),
                 active_scopes.to_vec(),
@@ -292,7 +288,17 @@ fn try_has_finally(node: Node) -> bool {
 }
 
 fn normalize_label_name(name: String) -> String {
-    name.to_ascii_lowercase()
+    let name = name.to_ascii_lowercase();
+    if name.bytes().all(|byte| byte.is_ascii_digit()) {
+        let canonical = name.trim_start_matches('0');
+        if canonical.is_empty() {
+            "0".to_string()
+        } else {
+            canonical.to_string()
+        }
+    } else {
+        name
+    }
 }
 
 fn proc_header<'tree>(def_proc: Node<'tree>) -> Option<Node<'tree>> {
@@ -946,7 +952,7 @@ fn register_label(ctx: &mut BuildContext<'_>, label: Node, current: BlockId) -> 
         current
     };
 
-    if let Some(identifier) = direct_child(label, "identifier") {
+    if let Some(identifier) = label_name_node(label) {
         let name = normalize_label_name(node_text(identifier, ctx.source));
         ctx.label_targets
             .insert((ctx.current_label_binding, name), target);
@@ -1032,7 +1038,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "goto" => {
             let statement_block = prepare_statement_block(ctx, current);
             add_stmt_ref(ctx, statement_block, child);
-            let label = direct_child(child, "identifier")
+            let label = label_name_node(child)
                 .map(|identifier| normalize_label_name(node_text(identifier, ctx.source)))
                 .unwrap_or_default();
             let target_scopes = ctx.label_scopes.get(&label).cloned().unwrap_or_default();
@@ -1646,6 +1652,10 @@ fn direct_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
         .children(&mut cursor)
         .find(|child| child.kind() == kind);
     child
+}
+
+fn label_name_node<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+    direct_child(node, "identifier").or_else(|| direct_child(node, "labelNumber"))
 }
 
 /// Use a fresh protected block after an existing statement. Unprotected

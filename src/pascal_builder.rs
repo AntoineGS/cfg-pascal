@@ -11,6 +11,7 @@ use crate::constructs::{
     raise_may_throw_during_evaluation, raised_exception_type, Flow, LabelBindingId, LoopFrame,
     PendingTransfer, ScopeId, TransferKind,
 };
+use crate::exception_types::{ExceptionTypeFact, ExceptionTypeIndex, TypeMatch};
 
 /// Build CFGs for all executable routine definitions in a parsed Pascal file.
 ///
@@ -37,11 +38,20 @@ use crate::constructs::{
 /// No main CFG is emitted for a body-less library, and no unit section CFG is
 /// emitted when the corresponding section is absent.
 ///
+/// Typed exception dispatch is precise only for proven, same-file,
+/// non-generic class constructors and transparent aliases.  Missing or
+/// imported types, unresolved method owners, class/value ambiguity, implicit
+/// `with` members, and preprocessor directives remain conservative exception
+/// alternatives; a preprocessor directive is a file-wide barrier because the
+/// Pascal grammar exposes it as a sibling extra.  Ordinary comments do not
+/// disable same-file resolution.
+///
 pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
     let root = tree.root_node();
+    let exception_types = ExceptionTypeIndex::build(root, source);
     let mut cfgs = Vec::new();
-    collect_def_proc_cfgs(root, source, None, &mut cfgs);
-    collect_module_cfgs(root, source, &mut cfgs);
+    collect_def_proc_cfgs(root, source, None, &exception_types, &mut cfgs);
+    collect_module_cfgs(root, source, &exception_types, &mut cfgs);
     cfgs.sort_by_key(|cfg| cfg.byte_range.start);
     cfgs
 }
@@ -50,6 +60,7 @@ fn collect_def_proc_cfgs(
     node: Node,
     source: &[u8],
     parent_qualified_name: Option<&str>,
+    exception_types: &ExceptionTypeIndex,
     out: &mut Vec<Cfg>,
 ) {
     if node.kind() == "defProc" {
@@ -65,7 +76,7 @@ fn collect_def_proc_cfgs(
             .map(|_| qualified_name.clone())
             .unwrap_or(local_name);
 
-        if let Some(cfg) = build_proc_cfg(node, source, proc_name) {
+        if let Some(cfg) = build_proc_cfg(node, source, proc_name, exception_types) {
             out.push(cfg);
         }
 
@@ -74,19 +85,24 @@ fn collect_def_proc_cfgs(
         // the routine body while collecting descendants, or its statements
         // would be mistaken for part of the containing routine.
         for child in field_children(node, "local") {
-            collect_def_proc_cfgs(child, source, Some(&qualified_name), out);
+            collect_def_proc_cfgs(child, source, Some(&qualified_name), exception_types, out);
         }
         return;
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_def_proc_cfgs(child, source, parent_qualified_name, out);
+        collect_def_proc_cfgs(child, source, parent_qualified_name, exception_types, out);
     }
 }
 
 /// Build a CFG for a single `defProc` node.
-fn build_proc_cfg(def_proc: Node, source: &[u8], proc_name: String) -> Option<Cfg> {
+fn build_proc_cfg(
+    def_proc: Node,
+    source: &[u8],
+    proc_name: String,
+    exception_types: &ExceptionTypeIndex,
+) -> Option<Cfg> {
     let block = def_proc.child_by_field_name("body")?;
 
     let byte_range = def_proc.start_byte()..def_proc.end_byte();
@@ -96,10 +112,16 @@ fn build_proc_cfg(def_proc: Node, source: &[u8], proc_name: String) -> Option<Cf
         block,
         ScopeBody::Block,
         source,
+        exception_types,
     ))
 }
 
-fn collect_module_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
+fn collect_module_cfgs(
+    node: Node,
+    source: &[u8],
+    exception_types: &ExceptionTypeIndex,
+    out: &mut Vec<Cfg>,
+) {
     let Some(module) = direct_named_child(node, ["program", "library", "unit"]) else {
         return;
     };
@@ -116,6 +138,7 @@ fn collect_module_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
                     body,
                     ScopeBody::Block,
                     source,
+                    exception_types,
                 ));
             }
         }
@@ -130,6 +153,7 @@ fn collect_module_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
                             section,
                             ScopeBody::Section,
                             source,
+                            exception_types,
                         ));
                     }
                     "block" => {
@@ -139,6 +163,7 @@ fn collect_module_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
                             section,
                             ScopeBody::Block,
                             source,
+                            exception_types,
                         ));
                     }
                     _ => continue,
@@ -177,6 +202,7 @@ fn build_scope_cfg(
     scope_node: Node,
     scope_body: ScopeBody,
     source: &[u8],
+    exception_types: &ExceptionTypeIndex,
 ) -> Cfg {
     let mut builder = DefaultCfgBuilder::new(scope_name, byte_range);
 
@@ -204,6 +230,7 @@ fn build_scope_cfg(
         builder: &mut builder,
         exit,
         source,
+        exception_types,
         loop_stack: Vec::new(),
         cleanup_scopes: Vec::new(),
         scope_ids,
@@ -218,6 +245,7 @@ fn build_scope_cfg(
         next_exception_dispatch_id: 0,
         exception_dispatch_stack: Vec::new(),
         implicit_exception_depth: 0,
+        handled_exception_stack: Vec::new(),
         block_has_stmt: HashSet::new(),
         label_scopes,
         label_targets: HashMap::new(),
@@ -387,6 +415,7 @@ struct BuildContext<'a> {
     builder: &'a mut DefaultCfgBuilder,
     exit: BlockId,
     source: &'a [u8],
+    exception_types: &'a ExceptionTypeIndex,
     loop_stack: Vec<LoopFrame>,
     cleanup_scopes: Vec<ScopeId>,
     /// Stable IDs for syntactic try/finally scopes, shared by all runtime
@@ -426,6 +455,8 @@ struct BuildContext<'a> {
     /// may throw outward even though the scope whose handler they belong to
     /// is no longer an active catch target.
     implicit_exception_depth: usize,
+    /// Facts for the exception currently handled by each nested handler body.
+    handled_exception_stack: Vec<ExceptionTypeFact>,
     /// Protected statements are split into separate blocks so their
     /// exceptional edge cannot also cover an earlier unprotected statement.
     block_has_stmt: HashSet<BlockId>,
@@ -991,13 +1022,34 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "raise" => {
             let statement_block = prepare_statement_block(ctx, current);
             add_stmt_ref(ctx, statement_block, child);
-            let mut transfers = vec![raised_exception_type(child, ctx.source)
-                .map(|exception_type| {
-                    PendingTransfer::exception_with_type(statement_block, exception_type)
-                })
-                .unwrap_or_else(|| PendingTransfer::exception(statement_block))];
-            if raise_may_throw_during_evaluation(child) {
-                transfers.extend(implicit_exception_transfers(ctx, statement_block));
+            let source_exception_type = raised_exception_type(child, ctx.source);
+            let exception_fact = if child.child_by_field_name("exception").is_none() {
+                ctx.handled_exception_stack
+                    .last()
+                    .copied()
+                    .unwrap_or(ExceptionTypeFact::Unknown)
+            } else {
+                ctx.exception_types.raised_fact(child, ctx.source)
+            };
+            let mut transfers = Vec::new();
+            if raise_may_throw_during_evaluation(child, ctx.source) {
+                if ctx.implicit_exception_depth > 0 {
+                    transfers.push(PendingTransfer::exception(statement_block));
+                }
+                let successful_raise = new_block(ctx, BasicBlockKind::Normal);
+                ctx.builder
+                    .add_edge(statement_block, successful_raise, EdgeKind::Normal);
+                transfers.push(PendingTransfer::exception_with_fact(
+                    successful_raise,
+                    exception_fact,
+                    source_exception_type,
+                ));
+            } else {
+                transfers.push(PendingTransfer::exception_with_fact(
+                    statement_block,
+                    exception_fact,
+                    source_exception_type,
+                ));
             }
             Flow {
                 normal: None,
@@ -1105,6 +1157,9 @@ enum ContinuationKey {
         target_label: Option<String>,
         target_label_binding: Option<LabelBindingId>,
         target_scopes: Vec<ScopeId>,
+        exception_fact: Option<ExceptionTypeFact>,
+        /// Source-level constructor metadata keeps evaluation and successful
+        /// raise continuations distinct without affecting semantic matching.
         exception_type: Option<String>,
     },
 }
@@ -1120,6 +1175,7 @@ impl ContinuationKey {
                 .map(|label| label.to_ascii_lowercase()),
             target_label_binding: transfer.target_label_binding,
             target_scopes: transfer.target_scopes.clone(),
+            exception_fact: transfer.exception_fact,
             exception_type: transfer
                 .exception_type
                 .as_ref()
@@ -1135,6 +1191,7 @@ impl ContinuationKey {
                 target_label,
                 target_label_binding,
                 target_scopes,
+                exception_fact,
                 exception_type,
             } => PendingTransfer {
                 source,
@@ -1144,6 +1201,7 @@ impl ContinuationKey {
                 target_label_binding: *target_label_binding,
                 target_scopes: target_scopes.clone(),
                 from_finally: true,
+                exception_fact: *exception_fact,
                 exception_type: exception_type.clone(),
             },
         }
@@ -1176,6 +1234,7 @@ struct FinalizerCacheKey {
     /// handler blocks when a finalizer is cloned.
     exception_dispatch_context: Vec<ExceptionDispatchId>,
     implicit_exception_depth: usize,
+    handled_exception_context: Vec<ExceptionTypeFact>,
     label_binding: Option<LabelBindingId>,
 }
 
@@ -1198,6 +1257,7 @@ struct FinalizerContinuationKey {
     local_continuation: Option<ContinuationKey>,
     suspended_transfer: Option<ContinuationKey>,
     caller: Option<FinalizerContinuationId>,
+    handled_exception_context: Vec<ExceptionTypeFact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1359,6 +1419,7 @@ fn walk_or_reuse_finally_body(
             .collect(),
         exception_dispatch_context: ctx.exception_dispatch_stack.clone(),
         implicit_exception_depth: ctx.implicit_exception_depth,
+        handled_exception_context: ctx.handled_exception_stack.clone(),
         label_binding: finally_body_contains_goto(node).then_some(ctx.current_label_binding),
     };
 
@@ -1376,6 +1437,7 @@ fn walk_or_reuse_finally_body(
         local_continuation: continuation.cloned(),
         suspended_transfer: suspended_transfer.clone(),
         caller: ctx.active_finalizer_continuation,
+        handled_exception_context: ctx.handled_exception_stack.clone(),
     };
     let continuation_id =
         if let Some(continuation_id) = ctx.finalizer_continuation_ids.get(&continuation_key) {
@@ -1438,9 +1500,10 @@ fn node_contains_goto(node: Node) -> bool {
 
 /// Handle a `try..except` block.
 ///
-/// Typed `on` handlers are conservative alternatives because this builder has
-/// no semantic exception hierarchy. A missing catch-all retains an unmatched
-/// exception transfer so an enclosing handler can receive it.
+/// Typed `on` handlers use the per-file exception type index when it can prove
+/// a match. Unknown or ambiguous facts remain alternatives, and a missing
+/// catch-all retains an unmatched exception transfer so an enclosing handler
+/// can receive it.
 fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
     let dispatch_id = ExceptionDispatchId(ctx.next_exception_dispatch_id);
     ctx.next_exception_dispatch_id += 1;
@@ -1460,35 +1523,54 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
     let mut exception_sources = Vec::new();
     for transfer in try_flow.transfers {
         if transfer.kind == TransferKind::Exception {
-            if let Some(existing) = exception_sources
-                .iter_mut()
-                .find(|existing: &&mut PendingTransfer| existing.source == transfer.source)
-            {
-                if existing.exception_type != transfer.exception_type {
-                    existing.exception_type = None;
-                }
-            } else {
-                exception_sources.push(transfer);
-            }
+            exception_sources.push(transfer);
         } else {
             output.transfers.push(transfer);
         }
     }
 
-    let handlers = build_except_handlers(ctx, node);
-    let has_catch_all = handlers.iter().any(|handler| handler.catch_all);
+    let incoming_facts: Vec<_> = exception_sources
+        .iter()
+        .map(|transfer| {
+            transfer
+                .exception_fact
+                .unwrap_or(ExceptionTypeFact::Unknown)
+        })
+        .collect();
+    let handlers = build_except_handlers(ctx, node, &incoming_facts);
 
     for transfer in exception_sources {
+        let raised_fact = transfer
+            .exception_fact
+            .unwrap_or(ExceptionTypeFact::Unknown);
+        let mut may_escape = true;
         for handler in &handlers {
-            ctx.builder
-                .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
+            if handler.catch_all {
+                ctx.builder
+                    .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
+                may_escape = false;
+                break;
+            }
+
+            match ctx
+                .exception_types
+                .match_handler(raised_fact, handler.exception_fact)
+            {
+                TypeMatch::Yes => {
+                    ctx.builder
+                        .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
+                    may_escape = false;
+                    break;
+                }
+                TypeMatch::No => continue,
+                TypeMatch::Unknown => {
+                    ctx.builder
+                        .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
+                }
+            }
         }
 
-        // A syntactic constructor name is not enough to prove that a handler
-        // catches the exception (subclasses and qualified names need semantic
-        // resolution). Keep the outward alternative unless there is a
-        // catch-all handler.
-        if !has_catch_all {
+        if may_escape {
             output.transfers.push(transfer);
         }
     }
@@ -1517,22 +1599,40 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
 struct HandlerFlow {
     entry: BlockId,
     catch_all: bool,
+    exception_fact: ExceptionTypeFact,
     flow: Flow,
 }
 
-fn build_except_handlers(ctx: &mut BuildContext<'_>, node: Node) -> Vec<HandlerFlow> {
+fn build_except_handlers(
+    ctx: &mut BuildContext<'_>,
+    node: Node,
+    incoming_facts: &[ExceptionTypeFact],
+) -> Vec<HandlerFlow> {
     let except_children = field_children(node, "except");
     let mut handlers = Vec::new();
 
     for child in except_children {
-        let (entry, catch_all) = match child.kind() {
-            "exceptionHandler" => (new_block(ctx, BasicBlockKind::ExceptHandler), false),
-            "exceptionElse" | "statements" => {
-                (new_block(ctx, BasicBlockKind::BareExceptHandler), true)
-            }
+        let (entry, catch_all, exception_fact) = match child.kind() {
+            "exceptionHandler" => (
+                new_block(ctx, BasicBlockKind::ExceptHandler),
+                false,
+                ctx.exception_types.handler_fact(child, ctx.source),
+            ),
+            "exceptionElse" | "statements" => (
+                new_block(ctx, BasicBlockKind::BareExceptHandler),
+                true,
+                ExceptionTypeFact::Unknown,
+            ),
             _ => continue,
         };
 
+        let handled_fact = if catch_all {
+            ExceptionTypeFact::Unknown
+        } else {
+            ctx.exception_types
+                .handler_context(exception_fact, incoming_facts)
+        };
+        ctx.handled_exception_stack.push(handled_fact);
         ctx.implicit_exception_depth += 1;
         let flow = if child.kind() == "exceptionHandler" {
             walk_field_children(ctx, child, "body", entry, false)
@@ -1542,10 +1642,12 @@ fn build_except_handlers(ctx: &mut BuildContext<'_>, node: Node) -> Vec<HandlerF
             walk_statements_node(ctx, child, entry)
         };
         ctx.implicit_exception_depth -= 1;
+        ctx.handled_exception_stack.pop();
 
         handlers.push(HandlerFlow {
             entry,
             catch_all,
+            exception_fact,
             flow,
         });
     }
@@ -1555,6 +1657,7 @@ fn build_except_handlers(ctx: &mut BuildContext<'_>, node: Node) -> Vec<HandlerF
         handlers.push(HandlerFlow {
             entry,
             catch_all: true,
+            exception_fact: ExceptionTypeFact::Unknown,
             flow: Flow::normal(entry),
         });
     }

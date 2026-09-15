@@ -479,6 +479,17 @@ end.
             successors(cfg, raise_stmt).contains(&(handler, EdgeKind::ExceptionThrow)),
             "{raise_text} must retain the typed handler as a conservative alternative"
         );
+        let successful_raise = successors(cfg, raise_stmt)
+            .into_iter()
+            .find_map(|(target, kind)| {
+                (kind == EdgeKind::Normal && cfg.graph[target.index()].stmts.is_empty())
+                    .then_some(target)
+            })
+            .expect("an executable raise expression must have a successful-evaluation block");
+        assert!(
+            successors(cfg, successful_raise).contains(&(handler, EdgeKind::ExceptionThrow)),
+            "{raise_text} must retain the typed handler on its successful-evaluation path"
+        );
     }
 }
 
@@ -516,6 +527,19 @@ end.
     assert!(
         raise_successors.contains(&(two_handler, EdgeKind::ExceptionThrow)),
         "constructor argument evaluation must retain unknown exception handlers"
+    );
+    let successful_raise = raise_successors
+        .into_iter()
+        .find_map(|(target, kind)| {
+            (kind == EdgeKind::Normal && cfg.graph[target.index()].stmts.is_empty())
+                .then_some(target)
+        })
+        .expect("constructor argument evaluation must have a successful-raise block");
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(successful_successors.contains(&(one_handler, EdgeKind::ExceptionThrow)));
+    assert!(
+        successful_successors.contains(&(two_handler, EdgeKind::ExceptionThrow)),
+        "constructor argument evaluation must retain unknown handlers after evaluation succeeds"
     );
 }
 

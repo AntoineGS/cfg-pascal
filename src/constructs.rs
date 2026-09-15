@@ -1,6 +1,8 @@
 use cfg_core::BlockId;
 use tree_sitter::Node;
 
+use crate::exception_types::ExceptionTypeFact;
+
 /// Extract the UTF-8 text of a node from the source bytes.
 pub(crate) fn node_text(node: Node, source: &[u8]) -> String {
     std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
@@ -158,6 +160,10 @@ pub(crate) struct PendingTransfer {
     pub target_label_binding: Option<LabelBindingId>,
     pub target_scopes: Vec<ScopeId>,
     pub from_finally: bool,
+    /// Semantic information used for exception-handler dispatch.
+    pub exception_fact: Option<ExceptionTypeFact>,
+    /// Syntactic constructor spelling retained as source metadata. It may
+    /// distinguish cleanup continuations, but never decides handler matches.
     pub exception_type: Option<String>,
 }
 
@@ -171,6 +177,7 @@ impl PendingTransfer {
             target_label_binding: None,
             target_scopes: Vec::new(),
             from_finally: false,
+            exception_fact: None,
             exception_type: None,
         }
     }
@@ -190,11 +197,20 @@ impl PendingTransfer {
             target_label_binding: None,
             target_scopes,
             from_finally: false,
+            exception_fact: None,
             exception_type: None,
         }
     }
 
     pub(crate) fn exception(source: BlockId) -> Self {
+        Self::exception_with_fact(source, ExceptionTypeFact::Unknown, None)
+    }
+
+    pub(crate) fn exception_with_fact(
+        source: BlockId,
+        exception_fact: ExceptionTypeFact,
+        exception_type: Option<String>,
+    ) -> Self {
         Self {
             source,
             kind: TransferKind::Exception,
@@ -203,14 +219,8 @@ impl PendingTransfer {
             target_label_binding: None,
             target_scopes: Vec::new(),
             from_finally: false,
-            exception_type: None,
-        }
-    }
-
-    pub(crate) fn exception_with_type(source: BlockId, exception_type: String) -> Self {
-        Self {
-            exception_type: Some(exception_type),
-            ..Self::exception(source)
+            exception_fact: Some(exception_fact),
+            exception_type,
         }
     }
 
@@ -228,6 +238,7 @@ impl PendingTransfer {
             target_label_binding: Some(target_label_binding),
             target_scopes,
             from_finally: false,
+            exception_fact: None,
             exception_type: None,
         }
     }
@@ -252,6 +263,7 @@ impl PendingTransfer {
             target_label_binding: self.target_label_binding,
             target_scopes: self.target_scopes.clone(),
             from_finally: true,
+            exception_fact: self.exception_fact,
             exception_type: self.exception_type.clone(),
         }
     }
@@ -259,19 +271,34 @@ impl PendingTransfer {
 
 /// Preserve the syntactic constructor name from `raise TException.Create(...)`.
 ///
-/// This is metadata only: without a semantic type resolver it must not be
-/// used to eliminate typed handlers. Calls such as `raise MakeError()` remain
-/// unknown because the function's return type is not available here.
+/// This is metadata only: semantic handler matching is performed by the
+/// per-file type index. Calls such as `raise MakeError()` remain unknown
+/// because the function's return type is not available here.
 pub(crate) fn raised_exception_type(node: Node, source: &[u8]) -> Option<String> {
+    raised_exception_parts(node, source).map(|parts| parts.join("."))
+}
+
+/// Extract the qualified receiver parts from `raise TException.Create(...)`.
+///
+/// This is source metadata only. Semantic validation of the receiver and its
+/// constructor belongs to `ExceptionTypeIndex`.
+pub(crate) fn raised_exception_parts(node: Node, source: &[u8]) -> Option<Vec<String>> {
     let exception = node.child_by_field_name("exception")?;
     match exception.kind() {
-        "exprCall" => constructor_type(exception, source),
+        "exprCall" => constructor_type_parts(exception, source),
+        "exprDot" => constructor_type_parts_from_entity(exception, source),
         "exprParens" => {
             let mut cursor = exception.walk();
             let exception_type = exception
                 .named_children(&mut cursor)
-                .find(|child| child.kind() == "exprCall")
-                .and_then(|child| constructor_type(child, source));
+                .find(|child| matches!(child.kind(), "exprCall" | "exprDot"))
+                .and_then(|child| {
+                    if child.kind() == "exprCall" {
+                        constructor_type_parts(child, source)
+                    } else {
+                        constructor_type_parts_from_entity(child, source)
+                    }
+                });
             exception_type
         }
         _ => None,
@@ -283,43 +310,53 @@ pub(crate) fn raised_exception_type(node: Node, source: &[u8]) -> Option<String>
 /// Constructor calls are executable expressions: even when their syntactic
 /// type is retained as metadata, evaluating the arguments or running the
 /// constructor may raise a different exception.
-pub(crate) fn raise_may_throw_during_evaluation(node: Node) -> bool {
+pub(crate) fn raise_may_throw_during_evaluation(node: Node, source: &[u8]) -> bool {
     let Some(exception) = node.child_by_field_name("exception") else {
         return false;
     };
     if exception.kind() == "exprCall" {
         return true;
     }
+    if exception.kind() == "exprDot" {
+        return raised_exception_parts(node, source).is_some();
+    }
     if exception.kind() == "exprParens" {
         let mut cursor = exception.walk();
         return exception
             .named_children(&mut cursor)
-            .any(raise_may_throw_during_evaluation_expression);
+            .any(|child| raise_may_throw_during_evaluation_expression(child, source));
     }
     false
 }
 
-fn raise_may_throw_during_evaluation_expression(node: Node) -> bool {
+fn raise_may_throw_during_evaluation_expression(node: Node, source: &[u8]) -> bool {
     if node.kind() == "exprCall" {
         return true;
+    }
+    if node.kind() == "exprDot" {
+        return constructor_type_parts_from_entity(node, source).is_some();
     }
     if node.kind() == "exprParens" {
         let mut cursor = node.walk();
         return node
             .named_children(&mut cursor)
-            .any(raise_may_throw_during_evaluation_expression);
+            .any(|child| raise_may_throw_during_evaluation_expression(child, source));
     }
     false
 }
 
-fn constructor_type(node: Node, source: &[u8]) -> Option<String> {
+fn constructor_type_parts(node: Node, source: &[u8]) -> Option<Vec<String>> {
     let entity = node.child_by_field_name("entity")?;
-    let mut parts = qualified_parts(entity, source)?;
+    constructor_type_parts_from_entity(entity, source)
+}
+
+fn constructor_type_parts_from_entity(node: Node, source: &[u8]) -> Option<Vec<String>> {
+    let mut parts = qualified_parts(node, source)?;
     let constructor = parts.pop()?;
     constructor
         .eq_ignore_ascii_case("create")
-        .then_some(parts.join("."))
-        .filter(|exception_type| !exception_type.is_empty())
+        .then_some(parts)
+        .filter(|parts| !parts.is_empty())
 }
 
 fn qualified_parts(node: Node, source: &[u8]) -> Option<Vec<String>> {

@@ -152,21 +152,48 @@
               {
                 "type": "SYMBOL",
                 "name": "implementation"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "initialization"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "finalization"
               }
             ]
           }
         },
         {
-          "type": "SYMBOL",
-          "name": "kEnd"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "ALIAS",
+              "content": {
+                "type": "SYMBOL",
+                "name": "blockTr"
+              },
+              "named": true,
+              "value": "block"
+            },
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "REPEAT",
+                  "content": {
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "SYMBOL",
+                        "name": "initialization"
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "finalization"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "kEnd"
+                }
+              ]
+            }
+          ]
         },
         {
           "type": "SYMBOL",
@@ -207,7 +234,7 @@
           "members": [
             {
               "type": "SYMBOL",
-              "name": "_definitions"
+              "name": "_unitDefinitions"
             },
             {
               "type": "BLANK"
@@ -4667,6 +4694,51 @@
       "content": {
         "type": "SYMBOL",
         "name": "_definition"
+      }
+    },
+    "_unitDefinitions": {
+      "type": "REPEAT1",
+      "content": {
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "SYMBOL",
+            "name": "declTypes"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "declVars"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "declConsts"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "defProc"
+          },
+          {
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "declProcFwd"
+            },
+            "named": true,
+            "value": "declProc"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "declLabels"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "declUses"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "declExports"
+          }
+        ]
       }
     },
     "_definition": {

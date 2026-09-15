@@ -5643,10 +5643,6 @@
       "required": true,
       "types": [
         {
-          "type": "blockTr",
-          "named": true
-        },
-        {
           "type": "declConsts",
           "named": true
         },
@@ -7827,6 +7823,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "block",
+          "named": true
+        },
         {
           "type": "finalization",
           "named": true

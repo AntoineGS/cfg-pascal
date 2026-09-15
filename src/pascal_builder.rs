@@ -28,10 +28,12 @@ use crate::constructs::{
 /// Programs and libraries also receive a synthetic `<module>.<main>` CFG when
 /// they contain a main `begin..end` body. Units receive one synthetic
 /// `<module>.<initialization>` or `<module>.<finalization>` CFG for each
-/// corresponding section node, including empty sections. Synthetic section
-/// ranges cover only the executable node: the main block's `begin..end` span,
-/// or the section keyword through its last statement. Module headers,
-/// declarations, and the program/library final `.` are excluded.
+/// corresponding section node, including empty sections. A legacy unit
+/// `implementation` followed by a direct `begin..end` body is exposed as the
+/// initialization CFG. Synthetic section ranges cover only the executable
+/// node: the main or legacy block's `begin..end` span, or the section keyword
+/// through its last statement. Module headers, declarations, and the
+/// program/library final `.` are excluded.
 /// No main CFG is emitted for a body-less library, and no unit section CFG is
 /// emitted when the corresponding section is absent.
 ///
@@ -120,18 +122,27 @@ fn collect_module_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
         "unit" => {
             let mut cursor = module.walk();
             for section in module.named_children(&mut cursor) {
-                let section_name = match section.kind() {
-                    "initialization" => "initialization",
-                    "finalization" => "finalization",
+                match section.kind() {
+                    "initialization" | "finalization" => {
+                        out.push(build_scope_cfg(
+                            format!("{module_name}.<{}>", section.kind()),
+                            section.start_byte()..section.end_byte(),
+                            section,
+                            ScopeBody::Section,
+                            source,
+                        ));
+                    }
+                    "block" => {
+                        out.push(build_scope_cfg(
+                            format!("{module_name}.<initialization>"),
+                            section.start_byte()..section.end_byte(),
+                            section,
+                            ScopeBody::Block,
+                            source,
+                        ));
+                    }
                     _ => continue,
-                };
-                out.push(build_scope_cfg(
-                    format!("{module_name}.<{section_name}>"),
-                    section.start_byte()..section.end_byte(),
-                    section,
-                    ScopeBody::Section,
-                    source,
-                ));
+                }
             }
         }
         _ => unreachable!("module collector only accepts module nodes"),

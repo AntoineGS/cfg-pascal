@@ -86,6 +86,23 @@ fn can_reach(cfg: &Cfg, from: BlockId, to: BlockId) -> bool {
     false
 }
 
+fn statement_free_roots(cfg: &Cfg) -> Vec<BlockId> {
+    cfg.graph
+        .node_indices()
+        .filter(|&node| {
+            node != cfg.entry.index()
+                && node != cfg.exit.index()
+                && cfg.graph[node].stmts.is_empty()
+                && !cfg.graph.edge_indices().any(|edge| {
+                    cfg.graph
+                        .edge_endpoints(edge)
+                        .is_some_and(|(_, target)| target == node)
+                })
+        })
+        .map(BlockId::from)
+        .collect()
+}
+
 #[test]
 fn case_labels_and_ranges_dispatch_to_independent_arms_and_default() {
     let source = br#"
@@ -395,6 +412,53 @@ end.
         .expect("with context reference");
     let context_text = std::str::from_utf8(&source[context_ref.byte_range.clone()]).unwrap();
     assert!(!context_text.contains("BodyCall"));
+}
+
+#[test]
+fn terminated_structures_do_not_leave_disconnected_continuation_roots() {
+    let source = br#"
+unit SyntheticContinuations;
+interface
+implementation
+
+procedure WithExit;
+begin
+  with Obj do
+    Exit;
+end;
+
+procedure CaseExit;
+begin
+  case Choice of
+    1: Exit;
+  else
+    Exit;
+  end;
+end;
+
+procedure FinallyExit;
+begin
+  try
+    Exit;
+  finally
+    Cleanup;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    for procedure in ["WithExit", "CaseExit", "FinallyExit"] {
+        let cfg = cfg_for(&cfgs, procedure);
+        assert_eq!(
+            statement_free_roots(cfg),
+            Vec::new(),
+            "{procedure} must not retain disconnected synthetic continuation blocks"
+        );
+    }
 }
 
 #[test]

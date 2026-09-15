@@ -766,7 +766,7 @@ fn handle_case(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
         );
     }
     let mut transfers = implicit_exception_transfers(ctx, selector_block);
-    let after_block = new_block(ctx, BasicBlockKind::Normal);
+    let mut normal_ends = Vec::new();
 
     let mut cursor = node.walk();
     for arm in node
@@ -778,29 +778,41 @@ fn handle_case(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
             .add_edge(selector_block, arm_block, EdgeKind::CaseArm);
         let arm_flow = walk_field_children(ctx, arm, "body", arm_block, false);
         if let Some(arm_end) = arm_flow.normal {
-            ctx.builder.add_edge(arm_end, after_block, EdgeKind::Normal);
+            normal_ends.push(arm_end);
         }
         transfers.extend(arm_flow.transfers);
     }
 
     let default_children = case_default_children(node);
-    if default_children.is_empty() {
-        ctx.builder
-            .add_edge(selector_block, after_block, EdgeKind::CaseArm);
-    } else {
+    if !default_children.is_empty() {
         let default_block = new_block(ctx, BasicBlockKind::Normal);
         ctx.builder
             .add_edge(selector_block, default_block, EdgeKind::CaseArm);
         let default_flow = walk_node_children(ctx, &default_children, default_block);
         if let Some(default_end) = default_flow.normal {
-            ctx.builder
-                .add_edge(default_end, after_block, EdgeKind::Normal);
+            normal_ends.push(default_end);
         }
         transfers.extend(default_flow.transfers);
     }
 
+    let after_block = if default_children.is_empty() || !normal_ends.is_empty() {
+        Some(new_block(ctx, BasicBlockKind::Normal))
+    } else {
+        None
+    };
+    if let Some(after_block) = after_block {
+        for normal_end in normal_ends {
+            ctx.builder
+                .add_edge(normal_end, after_block, EdgeKind::Normal);
+        }
+        if default_children.is_empty() {
+            ctx.builder
+                .add_edge(selector_block, after_block, EdgeKind::CaseArm);
+        }
+    }
+
     Flow {
-        normal: Some(after_block),
+        normal: after_block,
         transfers,
     }
 }
@@ -822,15 +834,16 @@ fn handle_with(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
     ctx.builder
         .add_edge(context_block, body_block, EdgeKind::Normal);
     let body_flow = walk_field_children(ctx, node, "body", body_block, false);
-    let after_block = new_block(ctx, BasicBlockKind::Normal);
-    if let Some(body_end) = body_flow.normal {
+    let after_block = body_flow.normal.map(|body_end| {
+        let after_block = new_block(ctx, BasicBlockKind::Normal);
         ctx.builder
             .add_edge(body_end, after_block, EdgeKind::Normal);
-    }
+        after_block
+    });
     transfers.extend(body_flow.transfers);
 
     Flow {
-        normal: Some(after_block),
+        normal: after_block,
         transfers,
     }
 }
@@ -1321,16 +1334,14 @@ fn node_contains_goto(node: Node) -> bool {
 /// no semantic exception hierarchy. A missing catch-all retains an unmatched
 /// exception transfer so an enclosing handler can receive it.
 fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
-    let after_block = new_block(ctx, BasicBlockKind::Normal);
-
     ctx.implicit_exception_depth += 1;
     let try_flow = walk_try_body(ctx, node, current);
     ctx.implicit_exception_depth -= 1;
 
     let mut output = Flow::default();
+    let mut normal_ends = Vec::new();
     if let Some(try_end) = try_flow.normal {
-        ctx.builder.add_edge(try_end, after_block, EdgeKind::Normal);
-        output.normal = Some(after_block);
+        normal_ends.push(try_end);
     }
 
     let mut exception_sources = Vec::new();
@@ -1351,7 +1362,7 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
         }
     }
 
-    let handlers = build_except_handlers(ctx, node, after_block);
+    let handlers = build_except_handlers(ctx, node);
     let has_catch_all = handlers.iter().any(|handler| handler.catch_all);
 
     for transfer in exception_sources {
@@ -1371,11 +1382,18 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
 
     for handler in handlers {
         if let Some(handler_end) = handler.flow.normal {
-            ctx.builder
-                .add_edge(handler_end, after_block, EdgeKind::Normal);
-            output.normal = Some(after_block);
+            normal_ends.push(handler_end);
         }
         output.transfers.extend(handler.flow.transfers);
+    }
+
+    if !normal_ends.is_empty() {
+        let after_block = new_block(ctx, BasicBlockKind::Normal);
+        for normal_end in normal_ends {
+            ctx.builder
+                .add_edge(normal_end, after_block, EdgeKind::Normal);
+        }
+        output.normal = Some(after_block);
     }
 
     output
@@ -1389,11 +1407,7 @@ struct HandlerFlow {
     flow: Flow,
 }
 
-fn build_except_handlers(
-    ctx: &mut BuildContext<'_>,
-    node: Node,
-    _after_block: BlockId,
-) -> Vec<HandlerFlow> {
+fn build_except_handlers(ctx: &mut BuildContext<'_>, node: Node) -> Vec<HandlerFlow> {
     let except_children = field_children(node, "except");
     let mut handlers = Vec::new();
 

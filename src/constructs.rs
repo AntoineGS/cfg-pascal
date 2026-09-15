@@ -67,15 +67,18 @@ pub(crate) fn is_break_call(node: Node, source: &[u8]) -> bool {
     match node.kind() {
         "statement" => {
             let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    let text = node_text(child, source);
-                    if text.eq_ignore_ascii_case("break") {
-                        return true;
-                    }
-                }
-            }
-            false
+            let result = node
+                .children(&mut cursor)
+                .any(|child| is_break_call(child, source));
+            result
+        }
+        "exprCall" => {
+            let Some(entity) = node.child_by_field_name("entity") else {
+                return false;
+            };
+            entity.kind() == "identifier"
+                && node_text(entity, source).eq_ignore_ascii_case("break")
+                && call_has_no_arguments(node)
         }
         "identifier" => {
             let text = node_text(node, source);
@@ -90,15 +93,18 @@ pub(crate) fn is_continue_call(node: Node, source: &[u8]) -> bool {
     match node.kind() {
         "statement" => {
             let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    let text = node_text(child, source);
-                    if text.eq_ignore_ascii_case("continue") {
-                        return true;
-                    }
-                }
-            }
-            false
+            let result = node
+                .children(&mut cursor)
+                .any(|child| is_continue_call(child, source));
+            result
+        }
+        "exprCall" => {
+            let Some(entity) = node.child_by_field_name("entity") else {
+                return false;
+            };
+            entity.kind() == "identifier"
+                && node_text(entity, source).eq_ignore_ascii_case("continue")
+                && call_has_no_arguments(node)
         }
         "identifier" => {
             let text = node_text(node, source);
@@ -106,6 +112,15 @@ pub(crate) fn is_continue_call(node: Node, source: &[u8]) -> bool {
         }
         _ => false,
     }
+}
+
+fn call_has_no_arguments(node: Node) -> bool {
+    let Some(args) = node.child_by_field_name("args") else {
+        return true;
+    };
+    let mut cursor = args.walk();
+    let result = args.named_children(&mut cursor).next().is_none();
+    result
 }
 
 /// Identifier for a cleanup scope that may need to be unwound by a control

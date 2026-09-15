@@ -314,3 +314,63 @@ end.
     assert!(!can_reach(cfg, exit_stmt, repeat_condition));
     assert!(!can_reach(cfg, exit_stmt, after_loop));
 }
+
+#[test]
+fn parenthesized_break_and_continue_have_exact_loop_successors() {
+    let source = br#"
+unit ParenthesizedLoopControls;
+interface
+implementation
+
+procedure ParenthesizedBreak;
+begin
+  while BreakCondition do
+  begin
+    if StopNow then
+      Break();
+    AfterBreak;
+  end;
+  AfterBreakLoop;
+end;
+
+procedure ParenthesizedContinue;
+begin
+  while ContinueCondition do
+  begin
+    if SkipRest then
+      Continue();
+    AfterContinue;
+  end;
+  AfterContinueLoop;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let break_cfg = cfg_for(&cfgs, "ParenthesizedBreak");
+    let break_stmt = block_with_stmt(break_cfg, &source, "statement", "Break()");
+    let break_condition = block_with_stmt(break_cfg, &source, "while", "while BreakCondition");
+    let break_after_loop = target_of(break_cfg, break_condition, EdgeKind::LoopExit);
+    assert_eq!(
+        successors(break_cfg, break_stmt),
+        vec![(break_after_loop, EdgeKind::Normal)],
+        "Break() must leave the active loop without falling through"
+    );
+
+    let continue_cfg = cfg_for(&cfgs, "ParenthesizedContinue");
+    let continue_stmt = block_with_stmt(continue_cfg, &source, "statement", "Continue()");
+    let continue_condition = block_with_stmt(
+        continue_cfg,
+        &source,
+        "while",
+        "while ContinueCondition",
+    );
+    assert_eq!(
+        successors(continue_cfg, continue_stmt),
+        vec![(continue_condition, EdgeKind::Normal)],
+        "Continue() must restart the active loop without reaching later body code"
+    );
+}

@@ -116,13 +116,14 @@ pub(crate) type ScopeId = usize;
 
 /// The kind of abrupt completion produced by a statement or expression.
 ///
-/// `Goto` will fit this model later by carrying a block target and the target
-/// scope set, without changing the cleanup routing API.
+/// `Goto` carries a label target and the target scope set, allowing cleanup
+/// routing to distinguish an in-scope jump from one that leaves a finalizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferKind {
     Exit,
     Break,
     Continue,
+    Goto,
     Exception,
 }
 
@@ -133,6 +134,7 @@ pub(crate) struct PendingTransfer {
     pub source: BlockId,
     pub kind: TransferKind,
     pub target: Option<BlockId>,
+    pub target_label: Option<String>,
     pub target_scopes: Vec<ScopeId>,
     pub from_finally: bool,
     pub exception_type: Option<String>,
@@ -144,6 +146,7 @@ impl PendingTransfer {
             source,
             kind: TransferKind::Exit,
             target: None,
+            target_label: None,
             target_scopes: Vec::new(),
             from_finally: false,
             exception_type: None,
@@ -161,6 +164,7 @@ impl PendingTransfer {
             source,
             kind,
             target: Some(target),
+            target_label: None,
             target_scopes,
             from_finally: false,
             exception_type: None,
@@ -172,6 +176,7 @@ impl PendingTransfer {
             source,
             kind: TransferKind::Exception,
             target: None,
+            target_label: None,
             target_scopes: Vec::new(),
             from_finally: false,
             exception_type: None,
@@ -185,12 +190,26 @@ impl PendingTransfer {
         }
     }
 
+    pub(crate) fn goto(source: BlockId, target_label: String, target_scopes: Vec<ScopeId>) -> Self {
+        Self {
+            source,
+            kind: TransferKind::Goto,
+            target: None,
+            target_label: Some(target_label),
+            target_scopes,
+            from_finally: false,
+            exception_type: None,
+        }
+    }
+
     /// Whether this transfer's target lies outside `scope_id` and therefore
     /// must pass through that scope's finalizer.
     pub(crate) fn leaves_scope(&self, scope_id: ScopeId) -> bool {
         match self.kind {
             TransferKind::Exception | TransferKind::Exit => true,
-            TransferKind::Break | TransferKind::Continue => !self.target_scopes.contains(&scope_id),
+            TransferKind::Break | TransferKind::Continue | TransferKind::Goto => {
+                !self.target_scopes.contains(&scope_id)
+            }
         }
     }
 
@@ -199,6 +218,7 @@ impl PendingTransfer {
             source,
             kind: self.kind,
             target: self.target,
+            target_label: self.target_label.clone(),
             target_scopes: self.target_scopes.clone(),
             from_finally: true,
             exception_type: self.exception_type.clone(),

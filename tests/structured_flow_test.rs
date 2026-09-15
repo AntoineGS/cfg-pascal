@@ -52,6 +52,24 @@ fn successors(cfg: &Cfg, from: BlockId) -> Vec<(BlockId, EdgeKind)> {
         .collect()
 }
 
+fn blocks_with_stmt(cfg: &Cfg, source: &[u8], kind: &str, text: &str) -> Vec<BlockId> {
+    cfg.graph
+        .node_indices()
+        .filter_map(|index| {
+            let block = &cfg.graph[index];
+            block
+                .stmts
+                .iter()
+                .any(|stmt| {
+                    stmt.node_kind == kind
+                        && std::str::from_utf8(&source[stmt.byte_range.clone()])
+                            .is_ok_and(|stmt_text| stmt_text.contains(text))
+                })
+                .then(|| BlockId::from(index))
+        })
+        .collect()
+}
+
 fn can_reach(cfg: &Cfg, from: BlockId, to: BlockId) -> bool {
     let mut pending = vec![from];
     let mut visited = HashSet::new();
@@ -377,4 +395,178 @@ end.
         .expect("with context reference");
     let context_text = std::str::from_utf8(&source[context_ref.byte_range.clone()]).unwrap();
     assert!(!context_text.contains("BodyCall"));
+}
+
+#[test]
+fn goto_resolves_forward_backward_case_insensitive_and_stops_fallthrough() {
+    let source = br#"
+unit GotoFlow;
+interface
+implementation
+
+procedure GotoTargets;
+begin
+  goto ForwardLabel;
+  SkippedForward;
+ForwardLabel:
+  ForwardBody;
+  goto BackLabel;
+BackLabel:
+  BackBody;
+  goto FORWARDLABEL;
+  UnreachableAfterBackward;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "GotoTargets");
+
+    let forward_goto = block_with_stmt(cfg, &source, "goto", "goto ForwardLabel");
+    let second_goto = block_with_stmt(cfg, &source, "goto", "goto BackLabel");
+    let backward_goto = block_with_stmt(cfg, &source, "goto", "goto FORWARDLABEL");
+    let forward_body = block_with_stmt(cfg, &source, "statement", "ForwardBody");
+    let back_body = block_with_stmt(cfg, &source, "statement", "BackBody");
+    let skipped = block_with_stmt(cfg, &source, "statement", "SkippedForward");
+    let unreachable = block_with_stmt(cfg, &source, "statement", "UnreachableAfterBackward");
+
+    assert_eq!(
+        successors(cfg, forward_goto),
+        vec![(forward_body, EdgeKind::Goto)],
+        "forward goto must target the labeled statement without fallthrough"
+    );
+    assert_eq!(
+        successors(cfg, second_goto),
+        vec![(back_body, EdgeKind::Goto)],
+        "goto target names must be resolved case-insensitively"
+    );
+    assert_eq!(
+        successors(cfg, backward_goto),
+        vec![(forward_body, EdgeKind::Goto)],
+        "backward goto must resolve to an earlier label"
+    );
+    assert!(!can_reach(cfg, forward_goto, skipped));
+    assert!(!can_reach(cfg, backward_goto, unreachable));
+    assert!(can_reach(cfg, forward_body, back_body));
+    assert!(can_reach(cfg, back_body, forward_body));
+}
+
+#[test]
+fn goto_inside_finally_scope_does_not_unwind_but_leaving_goto_does() {
+    let source = br#"
+unit GotoCleanup;
+interface
+implementation
+
+procedure SameScopeGoto;
+begin
+  try
+    goto InsideLabel;
+    SkippedInside;
+InsideLabel:
+    InsideBody;
+  finally
+    SameCleanup;
+  end;
+end;
+
+procedure LeavingGoto;
+begin
+  try
+    goto OutsideLabel;
+  finally
+    LeavingCleanup;
+  end;
+OutsideLabel:
+  OutsideBody;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let same_cfg = cfg_for(&cfgs, "SameScopeGoto");
+    let same_goto = block_with_stmt(same_cfg, &source, "goto", "goto InsideLabel");
+    let inside_label = block_with_stmt(same_cfg, &source, "label", "InsideLabel");
+    let inside_body = block_with_stmt(same_cfg, &source, "statement", "InsideBody");
+    assert_eq!(
+        successors(same_cfg, same_goto),
+        vec![(inside_label, EdgeKind::Goto)],
+        "a goto whose label remains in the try body must not enter its finally"
+    );
+    assert!(can_reach(same_cfg, inside_label, inside_body));
+
+    let leaving_cfg = cfg_for(&cfgs, "LeavingGoto");
+    let leaving_goto = block_with_stmt(leaving_cfg, &source, "goto", "goto OutsideLabel");
+    let leaving_cleanup = block_with_stmt(leaving_cfg, &source, "statement", "LeavingCleanup");
+    let outside_body = block_with_stmt(leaving_cfg, &source, "statement", "OutsideBody");
+    assert!(
+        successors(leaving_cfg, leaving_goto).contains(&(leaving_cleanup, EdgeKind::FinallyEntry)),
+        "a goto leaving a finally scope must enter its cleanup"
+    );
+    assert!(
+        successors(leaving_cfg, leaving_cleanup).contains(&(outside_body, EdgeKind::FinallyExit))
+    );
+    assert!(!successors(leaving_cfg, leaving_goto)
+        .iter()
+        .any(|(target, kind)| *target == outside_body && *kind == EdgeKind::Goto));
+}
+
+#[test]
+fn goto_finalizer_clones_keep_distinct_label_continuations() {
+    let source = br#"
+unit GotoFinalizerLabels;
+interface
+implementation
+
+procedure DistinctGotoLabels;
+begin
+  try
+    if ChooseFirst then
+      goto FirstLabel
+    else
+      goto SecondLabel;
+  finally
+    CleanupBranch;
+  end;
+FirstLabel:
+  FirstBody;
+  Exit;
+SecondLabel:
+  SecondBody;
+  Exit;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "DistinctGotoLabels");
+
+    let first_body = block_with_stmt(cfg, &source, "statement", "FirstBody");
+    let second_body = block_with_stmt(cfg, &source, "statement", "SecondBody");
+    let cleanup_blocks = blocks_with_stmt(cfg, &source, "statement", "CleanupBranch");
+    assert!(
+        cleanup_blocks.len() >= 2,
+        "different goto labels need distinct finalizer continuations"
+    );
+
+    let first_cleanup = cleanup_blocks
+        .iter()
+        .copied()
+        .find(|cleanup| successors(cfg, *cleanup).contains(&(first_body, EdgeKind::FinallyExit)))
+        .expect("one finalizer clone must continue to FirstLabel");
+    let second_cleanup = cleanup_blocks
+        .iter()
+        .copied()
+        .find(|cleanup| successors(cfg, *cleanup).contains(&(second_body, EdgeKind::FinallyExit)))
+        .expect("one finalizer clone must continue to SecondLabel");
+    assert_ne!(first_cleanup, second_cleanup);
+    assert!(!can_reach(cfg, first_cleanup, second_body));
+    assert!(!can_reach(cfg, second_cleanup, first_body));
 }

@@ -1,4 +1,7 @@
-use std::{collections::HashSet, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use cfg_core::{BasicBlockKind, BlockId, Cfg, CfgBuildSink, DefaultCfgBuilder, EdgeKind, StmtRef};
 use tree_sitter::Node;
@@ -51,6 +54,10 @@ fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
     let body = builder.new_block(BasicBlockKind::Normal);
     builder.add_edge(entry, body, EdgeKind::Normal);
 
+    let mut label_scopes = HashMap::new();
+    let mut label_scope_id = 0;
+    collect_label_scopes(block, source, &[], &mut label_scope_id, &mut label_scopes);
+
     let mut ctx = BuildContext {
         builder: &mut builder,
         exit,
@@ -60,12 +67,68 @@ fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
         next_scope_id: 0,
         implicit_exception_depth: 0,
         block_has_stmt: HashSet::new(),
+        label_scopes,
+        label_targets: HashMap::new(),
     };
 
     let final_flow = walk_block_stmts(&mut ctx, block, body);
     finish_flow(&mut ctx, final_flow);
 
     Some(builder.finish())
+}
+
+fn collect_label_scopes(
+    node: Node,
+    source: &[u8],
+    active_scopes: &[ScopeId],
+    next_scope_id: &mut ScopeId,
+    labels: &mut HashMap<String, Vec<ScopeId>>,
+) {
+    if node.kind() == "defProc" {
+        return;
+    }
+
+    if node.kind() == "label" {
+        if let Some(identifier) = direct_child(node, "identifier") {
+            labels.insert(
+                normalize_label_name(node_text(identifier, source)),
+                active_scopes.to_vec(),
+            );
+        }
+        return;
+    }
+
+    if node.kind() == "try" && try_has_finally(node) {
+        let scope_id = *next_scope_id;
+        *next_scope_id += 1;
+        let mut try_scopes = active_scopes.to_vec();
+        try_scopes.push(scope_id);
+
+        for child in field_children(node, "try") {
+            collect_label_scopes(child, source, &try_scopes, next_scope_id, labels);
+        }
+        for field in ["except", "finally"] {
+            for child in field_children(node, field) {
+                collect_label_scopes(child, source, active_scopes, next_scope_id, labels);
+            }
+        }
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_label_scopes(child, source, active_scopes, next_scope_id, labels);
+    }
+}
+
+fn try_has_finally(node: Node) -> bool {
+    field_children(node, "finally")
+        .iter()
+        .any(|child| child.kind() == "kFinally")
+}
+
+fn normalize_label_name(name: String) -> String {
+    name.to_ascii_lowercase()
 }
 
 /// Extract the procedure/function name from a `defProc` node.
@@ -139,6 +202,11 @@ struct BuildContext<'a> {
     /// Protected statements are split into separate blocks so their
     /// exceptional edge cannot also cover an earlier unprotected statement.
     block_has_stmt: HashSet<BlockId>,
+    /// Cleanup scopes containing each label, collected before CFG construction
+    /// so forward gotos can be routed through finalizers precisely.
+    label_scopes: HashMap<String, Vec<ScopeId>>,
+    /// Label targets discovered while walking the procedure body.
+    label_targets: HashMap<String, BlockId>,
 }
 
 fn new_block(ctx: &mut BuildContext<'_>, kind: BasicBlockKind) -> BlockId {
@@ -169,6 +237,21 @@ fn route_transfer(ctx: &mut BuildContext<'_>, transfer: PendingTransfer) {
                 transfer_completion_edge(&transfer),
             );
         }
+        TransferKind::Goto => {
+            let target = transfer.target.or_else(|| {
+                transfer
+                    .target_label
+                    .as_ref()
+                    .and_then(|label| ctx.label_targets.get(label).copied())
+            });
+            if let Some(target) = target {
+                ctx.builder
+                    .add_edge(transfer.source, target, transfer_completion_edge(&transfer));
+            } else {
+                ctx.builder
+                    .add_edge(transfer.source, ctx.exit, EdgeKind::Goto);
+            }
+        }
         TransferKind::Break | TransferKind::Continue => {
             if let Some(target) = transfer.target {
                 ctx.builder
@@ -179,10 +262,10 @@ fn route_transfer(ctx: &mut BuildContext<'_>, transfer: PendingTransfer) {
 }
 
 fn transfer_completion_edge(transfer: &PendingTransfer) -> EdgeKind {
-    if transfer.from_finally {
-        EdgeKind::FinallyExit
-    } else {
-        EdgeKind::Normal
+    match transfer.kind {
+        TransferKind::Goto if !transfer.from_finally => EdgeKind::Goto,
+        _ if transfer.from_finally => EdgeKind::FinallyExit,
+        _ => EdgeKind::Normal,
     }
 }
 
@@ -200,10 +283,7 @@ fn walk_block_stmts(ctx: &mut BuildContext<'_>, block: Node, current: BlockId) -
             continue;
         }
 
-        let Some(normal) = current else {
-            break;
-        };
-        let child_flow = process_single_stmt(ctx, child, normal);
+        let child_flow = process_sequence_child(ctx, child, current);
         current = child_flow.normal;
         transfers.extend(child_flow.transfers);
     }
@@ -229,10 +309,7 @@ fn walk_statements_node(
             continue;
         }
 
-        let Some(normal) = current else {
-            break;
-        };
-        let child_flow = process_single_stmt(ctx, child, normal);
+        let child_flow = process_sequence_child(ctx, child, current);
         current = child_flow.normal;
         transfers.extend(child_flow.transfers);
     }
@@ -261,10 +338,7 @@ fn walk_field_children(
             continue;
         }
 
-        let Some(normal) = current else {
-            break;
-        };
-        let child_flow = process_single_stmt(ctx, child, normal);
+        let child_flow = process_sequence_child(ctx, child, current);
         current = child_flow.normal;
         transfers.extend(child_flow.transfers);
     }
@@ -565,10 +639,7 @@ fn walk_node_children(ctx: &mut BuildContext<'_>, children: &[Node<'_>], current
         if child.kind() == ";" {
             continue;
         }
-        let Some(normal) = current else {
-            break;
-        };
-        let child_flow = process_single_stmt(ctx, child, normal);
+        let child_flow = process_sequence_child(ctx, child, current);
         current = child_flow.normal;
         transfers.extend(child_flow.transfers);
     }
@@ -577,6 +648,43 @@ fn walk_node_children(ctx: &mut BuildContext<'_>, children: &[Node<'_>], current
         normal: current,
         transfers,
     }
+}
+
+fn process_sequence_child(
+    ctx: &mut BuildContext<'_>,
+    child: Node,
+    current: Option<BlockId>,
+) -> Flow {
+    if child.is_extra() {
+        return Flow {
+            normal: current,
+            transfers: Vec::new(),
+        };
+    }
+
+    let current = current.unwrap_or_else(|| new_block(ctx, BasicBlockKind::Normal));
+    if child.kind() == "label" {
+        return Flow::normal(register_label(ctx, child, current));
+    }
+
+    process_single_stmt(ctx, child, current)
+}
+
+fn register_label(ctx: &mut BuildContext<'_>, label: Node, current: BlockId) -> BlockId {
+    let target = if ctx.block_has_stmt.contains(&current) {
+        let next = new_block(ctx, BasicBlockKind::Normal);
+        ctx.builder.add_edge(current, next, EdgeKind::Normal);
+        next
+    } else {
+        current
+    };
+
+    if let Some(identifier) = direct_child(label, "identifier") {
+        let name = normalize_label_name(node_text(identifier, ctx.source));
+        ctx.label_targets.insert(name, target);
+    }
+    add_stmt_ref(ctx, target, label);
+    target
 }
 
 /// Process a single statement node in any syntactic context.
@@ -653,6 +761,15 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
             };
             Flow::transfer(transfer)
         }
+        "goto" => {
+            let statement_block = prepare_statement_block(ctx, current);
+            add_stmt_ref(ctx, statement_block, child);
+            let label = direct_child(child, "identifier")
+                .map(|identifier| normalize_label_name(node_text(identifier, ctx.source)))
+                .unwrap_or_default();
+            let target_scopes = ctx.label_scopes.get(&label).cloned().unwrap_or_default();
+            Flow::transfer(PendingTransfer::goto(statement_block, label, target_scopes))
+        }
         _ => {
             let statement_block = prepare_statement_block(ctx, current);
             add_stmt_ref(ctx, statement_block, child);
@@ -666,9 +783,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
 
 /// Handle either `try..finally` or `try..except` based on parser fields.
 fn handle_try(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
-    let has_finally = field_children(node, "finally")
-        .iter()
-        .any(|child| child.kind() == "kFinally");
+    let has_finally = try_has_finally(node);
     let has_except = field_children(node, "except")
         .iter()
         .any(|child| child.kind() == "kExcept");
@@ -698,6 +813,7 @@ enum FinalizerKey {
     Transfer {
         kind: TransferKind,
         target: Option<BlockId>,
+        target_label: Option<String>,
         target_scopes: Vec<ScopeId>,
         exception_type: Option<String>,
     },
@@ -710,6 +826,10 @@ impl FinalizerKey {
             FinalizerInput::Transfer(transfer) => Self::Transfer {
                 kind: transfer.kind,
                 target: transfer.target,
+                target_label: transfer
+                    .target_label
+                    .as_ref()
+                    .map(|label| label.to_ascii_lowercase()),
                 target_scopes: transfer.target_scopes.clone(),
                 exception_type: transfer
                     .exception_type
@@ -956,10 +1076,7 @@ fn walk_exception_else_body(
         if child.kind() == "kElse" || child.kind() == ";" {
             continue;
         }
-        let Some(normal) = current else {
-            break;
-        };
-        let child_flow = process_single_stmt(ctx, child, normal);
+        let child_flow = process_sequence_child(ctx, child, current);
         current = child_flow.normal;
         transfers.extend(child_flow.transfers);
     }

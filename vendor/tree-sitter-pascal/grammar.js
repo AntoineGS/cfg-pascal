@@ -292,13 +292,6 @@ module.exports = grammar({
 	conflicts: $ => [
 		[$._statementsTr],
 		[$.exceptionElse, $.labeledStatement],
-		[$.raise, $.raiseTr],
-		[$.while, $.whileTr],
-		[$.with, $.withTr],
-		[$.labeledStatement, $.labeledStatementTr],
-		[$.labeledStatementTr],
-		[$.for, $.forTr],
-		[$.foreach, $.foreachTr],
 		// The following conflict rules are only needed because "public" can be
 		// a visibility or an attribute. *sigh*
 		// TODO: We would probably avoid this by having separate decl* clauses
@@ -392,10 +385,15 @@ module.exports = grammar({
 		caseLabel:       $ => seq(delimited1(choice($._expr, $.range)), ':'),
 
 		_statements:     $ => repeat1(choice($.varDef, $._statement,  $.label)),
-		_statementsTr:   $ => seq(
-			repeat(choice($._statement, $.label)),
-			choice(tr($,'_statement'), $._statement, $.label),
-			repeat($.label)
+		_statementsTr:   $ => choice(
+			seq(
+				repeat(choice($._statement, $.label)),
+				choice(tr($,'_statement'), $._statement)
+			),
+			seq(
+				repeat(choice($._statement, $.label)),
+				repeat1($.label)
+			)
 		),
 
 		statements:      $ => $._statements,

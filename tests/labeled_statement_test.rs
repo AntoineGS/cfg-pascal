@@ -4,12 +4,16 @@ use cfg_core::{BlockId, Cfg, EdgeKind};
 use cfg_pascal::build_file_cfgs;
 use tree_sitter::{Parser, Tree};
 
-fn parse_clean(source: &[u8]) -> Tree {
+fn parse(source: &[u8]) -> Tree {
     let mut parser = Parser::new();
     parser
         .set_language(&cfg_pascal::LANGUAGE.into())
         .expect("failed to set Pascal language");
-    let tree = parser.parse(source, None).expect("parser returned no tree");
+    parser.parse(source, None).expect("parser returned no tree")
+}
+
+fn parse_clean(source: &[u8]) -> Tree {
+    let tree = parse(source);
     assert!(
         !tree.root_node().has_error(),
         "labeled-statement fixture must not contain parser errors:\n{}",
@@ -71,6 +75,37 @@ fn named_and_numeric_labels_parse_as_single_statement_prefixes() {
     for source in [
         b"program NumericLabel; label 1; begin if B then 1: Work; end.".as_slice(),
         b"program NamedLabel; label WorkLabel; begin if B then WorkLabel: Work; end.".as_slice(),
+    ] {
+        parse_clean(source);
+    }
+}
+
+#[test]
+fn missing_statement_separators_remain_parse_errors() {
+    for source in [
+        b"program MissingSeparator; begin Work L: end.".as_slice(),
+        b"program MissingGotoSeparator; begin goto L L: end.".as_slice(),
+        b"program MissingRepeatSeparator; begin repeat Work L: until B end.".as_slice(),
+        b"program MissingTrySeparator; begin try Work L: finally Cleanup end end.".as_slice(),
+    ] {
+        let tree = parse(source);
+        assert!(
+            tree.root_node().has_error(),
+            "missing statement separator must be rejected for {:?}:\n{}",
+            std::str::from_utf8(source).expect("fixture is UTF-8"),
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
+fn valid_statement_separators_and_label_sequences_remain_parse_clean() {
+    for source in [
+        b"program ValidBlock; begin Work; L: end.".as_slice(),
+        b"program ValidRepeat; begin repeat Work; L: until B end.".as_slice(),
+        b"program ValidTry; begin try Work; L: finally Cleanup end end.".as_slice(),
+        b"program ValidEmptyLabel; begin Work1: end.".as_slice(),
+        b"program ValidConsecutiveLabels; begin L1: L2: Work; end.".as_slice(),
     ] {
         parse_clean(source);
     }

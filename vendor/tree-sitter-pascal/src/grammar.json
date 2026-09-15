@@ -2822,47 +2822,69 @@
       }
     },
     "_statementsTr": {
-      "type": "SEQ",
+      "type": "CHOICE",
       "members": [
         {
-          "type": "REPEAT",
-          "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "_statement"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "label"
-              }
-            ]
-          }
-        },
-        {
-          "type": "CHOICE",
+          "type": "SEQ",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "_statementTr"
+              "type": "REPEAT",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_statement"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "label"
+                  }
+                ]
+              }
             },
             {
-              "type": "SYMBOL",
-              "name": "_statement"
-            },
-            {
-              "type": "SYMBOL",
-              "name": "label"
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "_statementTr"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_statement"
+                }
+              ]
             }
           ]
         },
         {
-          "type": "REPEAT",
-          "content": {
-            "type": "SYMBOL",
-            "name": "label"
-          }
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "REPEAT",
+              "content": {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_statement"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "label"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "REPEAT1",
+              "content": {
+                "type": "SYMBOL",
+                "name": "label"
+              }
+            }
+          ]
         }
       ]
     },
@@ -10038,33 +10060,6 @@
     [
       "exceptionElse",
       "labeledStatement"
-    ],
-    [
-      "raise",
-      "raiseTr"
-    ],
-    [
-      "while",
-      "whileTr"
-    ],
-    [
-      "with",
-      "withTr"
-    ],
-    [
-      "labeledStatement",
-      "labeledStatementTr"
-    ],
-    [
-      "labeledStatementTr"
-    ],
-    [
-      "for",
-      "forTr"
-    ],
-    [
-      "foreach",
-      "foreachTr"
     ],
     [
       "_declProc"

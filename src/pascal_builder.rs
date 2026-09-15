@@ -139,83 +139,10 @@ fn walk_block_stmts(ctx: &mut BuildContext, block: Node, mut current: BlockId) -
         match child.kind() {
             // Skip structural tokens
             "kBegin" | "kEnd" | ";" | "declVars" | "declConsts" | "declTypes" => continue,
-
-            "ifElse" => match handle_if_else(ctx, child, current) {
-                Some(join) => current = join,
+            _ => match process_single_stmt(ctx, child, current) {
+                Some(next) => current = next,
                 None => return None,
             },
-
-            "if" => match handle_if_only(ctx, child, current) {
-                Some(join) => current = join,
-                None => return None,
-            },
-
-            "raise" => {
-                handle_raise(ctx, child, current);
-                return None;
-            }
-
-            "try" => match handle_try(ctx, child, current) {
-                Some(after) => current = after,
-                None => return None,
-            },
-
-            "for" | "while" => match handle_for_or_while(ctx, child, current) {
-                Some(after) => current = after,
-                None => return None,
-            },
-
-            "repeat" => match handle_repeat(ctx, child, current) {
-                Some(after) => current = after,
-                None => return None,
-            },
-
-            "statement" => {
-                // A `statement` node can wrap Exit, Break, Continue, or other calls.
-                if is_exit_call(child, ctx.source) {
-                    // Exit terminates the current block and goes to the exit block.
-                    add_stmt_ref(ctx, current, child);
-                    ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                    return None;
-                }
-                if is_break_call(child, ctx.source) {
-                    add_stmt_ref(ctx, current, child);
-                    if let Some(frame) = ctx.loop_stack.last() {
-                        ctx.builder
-                            .add_edge(current, frame.break_target, EdgeKind::Normal);
-                    }
-                    return None;
-                }
-                if is_continue_call(child, ctx.source) {
-                    add_stmt_ref(ctx, current, child);
-                    if let Some(frame) = ctx.loop_stack.last() {
-                        ctx.builder
-                            .add_edge(current, frame.continue_target, EdgeKind::Normal);
-                    }
-                    return None;
-                }
-                // Regular statement
-                add_stmt_ref(ctx, current, child);
-            }
-
-            "block" => {
-                // Nested begin..end block
-                match walk_block_stmts(ctx, child, current) {
-                    Some(after) => current = after,
-                    None => return None,
-                }
-            }
-
-            _ => {
-                // Any other statement node (assignment, exprCall, etc.)
-                // Check if it's an exit call at the top level
-                if is_exit_call(child, ctx.source) {
-                    add_stmt_ref(ctx, current, child);
-                    ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                    return None;
-                }
-                add_stmt_ref(ctx, current, child);
-            }
         }
     }
 
@@ -316,51 +243,16 @@ fn process_if_then_children(
     if_node: Node,
     then_block: BlockId,
 ) -> Option<BlockId> {
-    let mut past_then = false;
-    let current = then_block;
     let mut cursor = if_node.walk();
 
-    for child in if_node.children(&mut cursor) {
-        if child.kind() == "kThen" {
-            past_then = true;
-            continue;
-        }
-        if !past_then {
-            continue;
-        }
-        // Skip semicolons
+    let mut current = then_block;
+    for child in if_node.children_by_field_name("then", &mut cursor) {
         if child.kind() == ";" {
             continue;
         }
-
-        // Process the then-body statement
-        match child.kind() {
-            "raise" => {
-                handle_raise(ctx, child, current);
-                return None;
-            }
-            "statement" if is_exit_call(child, ctx.source) => {
-                add_stmt_ref(ctx, current, child);
-                ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                return None;
-            }
-            "block" => {
-                return walk_block_stmts(ctx, child, current);
-            }
-            "ifElse" => {
-                return handle_if_else(ctx, child, current);
-            }
-            "if" => {
-                return handle_if_only(ctx, child, current);
-            }
-            _ => {
-                if is_exit_call(child, ctx.source) {
-                    add_stmt_ref(ctx, current, child);
-                    ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                    return None;
-                }
-                add_stmt_ref(ctx, current, child);
-            }
+        match process_single_stmt(ctx, child, current) {
+            Some(next) => current = next,
+            None => return None,
         }
     }
 
@@ -374,7 +266,7 @@ fn process_branch_child(
     field_name: &str,
     branch_block: BlockId,
 ) -> Option<BlockId> {
-    let current = branch_block;
+    let mut current = branch_block;
     let mut cursor = parent.walk();
 
     for child in parent.children_by_field_name(field_name, &mut cursor) {
@@ -384,33 +276,9 @@ fn process_branch_child(
             _ => {}
         }
 
-        match child.kind() {
-            "raise" => {
-                handle_raise(ctx, child, current);
-                return None;
-            }
-            "statement" if is_exit_call(child, ctx.source) => {
-                add_stmt_ref(ctx, current, child);
-                ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                return None;
-            }
-            "block" => {
-                return walk_block_stmts(ctx, child, current);
-            }
-            "ifElse" => {
-                return handle_if_else(ctx, child, current);
-            }
-            "if" => {
-                return handle_if_only(ctx, child, current);
-            }
-            _ => {
-                if is_exit_call(child, ctx.source) {
-                    add_stmt_ref(ctx, current, child);
-                    ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                    return None;
-                }
-                add_stmt_ref(ctx, current, child);
-            }
+        match process_single_stmt(ctx, child, current) {
+            Some(next) => current = next,
+            None => return None,
         }
     }
 
@@ -580,6 +448,7 @@ fn process_repeat_body(
 fn process_single_stmt(ctx: &mut BuildContext, child: Node, current: BlockId) -> Option<BlockId> {
     match child.kind() {
         "block" => walk_block_stmts(ctx, child, current),
+        "statements" => walk_statements_node(ctx, child, current),
         "ifElse" => handle_if_else(ctx, child, current),
         "if" => handle_if_only(ctx, child, current),
         "raise" => {

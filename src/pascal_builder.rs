@@ -4,8 +4,8 @@ use cfg_core::{BasicBlockKind, BlockId, Cfg, CfgBuildSink, DefaultCfgBuilder, Ed
 use tree_sitter::Node;
 
 use crate::constructs::{
-    is_break_call, is_continue_call, is_exit_call, node_text, raised_exception_type, Flow,
-    LoopFrame, PendingTransfer, ScopeId, TransferKind,
+    exit_has_argument, is_break_call, is_continue_call, is_exit_call, node_text,
+    raised_exception_type, Flow, LoopFrame, PendingTransfer, ScopeId, TransferKind,
 };
 
 /// Build CFGs for all procedure/function definitions in a parsed Pascal file.
@@ -471,7 +471,14 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "statement" if is_exit_call(child, ctx.source) => {
             let statement_block = prepare_statement_block(ctx, current);
             add_stmt_ref(ctx, statement_block, child);
-            Flow::transfer(PendingTransfer::exit(statement_block))
+            let mut transfers = vec![PendingTransfer::exit(statement_block)];
+            if exit_has_argument(child, ctx.source) {
+                transfers.extend(implicit_exception_transfers(ctx, statement_block));
+            }
+            Flow {
+                normal: None,
+                transfers,
+            }
         }
         "statement" if is_break_call(child, ctx.source) => {
             let statement_block = prepare_statement_block(ctx, current);

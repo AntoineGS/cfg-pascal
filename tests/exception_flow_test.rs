@@ -422,3 +422,203 @@ end.
         "unknown protected exceptions must dispatch to exceptionElse"
     );
 }
+
+#[test]
+fn implicit_exceptions_attach_to_protected_statements_and_conditions_only() {
+    let source = br#"
+unit ImplicitExceptions;
+interface
+implementation
+
+procedure ProtectedStatements;
+begin
+  BeforeUnprotected();
+  try
+    if ConditionCall() then
+      ThenCall()
+    else
+      ElseCall();
+    while LoopConditionCall() do
+      LoopBodyCall();
+    AfterProtectedCall();
+  except
+    HandleProtected();
+  end;
+  AfterTryCall();
+end;
+
+procedure HandlerThrows;
+begin
+  try
+    raise Exception.Create('body');
+  except
+    HandlerThrowsCall();
+  end;
+end;
+
+procedure FinalizerThrows;
+begin
+  try
+    ProtectedWork();
+  finally
+    FinalizerThrowsCall();
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let cfg = cfg_for(&cfgs, "ProtectedStatements");
+    let handler = block_with_stmt(cfg, &source, "statement", "HandleProtected");
+    let before = block_with_stmt(cfg, &source, "statement", "BeforeUnprotected");
+    let condition = block_with_stmt(cfg, &source, "ifElse", "if ConditionCall");
+    let then_call = block_with_stmt(cfg, &source, "statement", "ThenCall");
+    let else_call = block_with_stmt(cfg, &source, "statement", "ElseCall");
+    let loop_condition = block_with_stmt(cfg, &source, "while", "while LoopConditionCall");
+    let loop_body = block_with_stmt(cfg, &source, "statement", "LoopBodyCall");
+    let after_loop = block_with_stmt(cfg, &source, "statement", "AfterProtectedCall");
+
+    assert!(
+        !successors(cfg, before)
+            .iter()
+            .any(|(_, kind)| *kind == EdgeKind::ExceptionThrow),
+        "unprotected code before try must not enter the inner handler"
+    );
+    for protected_block in [
+        condition,
+        then_call,
+        else_call,
+        loop_condition,
+        loop_body,
+        after_loop,
+    ] {
+        assert!(
+            successors(cfg, protected_block).contains(&(handler, EdgeKind::ExceptionThrow)),
+            "protected block {protected_block:?} must have an exceptional handler edge"
+        );
+    }
+
+    let condition_text = cfg.graph[condition.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "ifElse")
+        .map(|stmt| std::str::from_utf8(&source[stmt.byte_range.clone()]).unwrap())
+        .expect("if condition statement reference");
+    assert!(!condition_text.contains("ThenCall"));
+    assert!(!condition_text.contains("ElseCall"));
+
+    let loop_text = cfg.graph[loop_condition.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "while")
+        .map(|stmt| std::str::from_utf8(&source[stmt.byte_range.clone()]).unwrap())
+        .expect("while condition statement reference");
+    assert!(!loop_text.contains("LoopBodyCall"));
+    assert!(!loop_text.contains("AfterProtectedCall"));
+}
+
+#[test]
+fn handler_and_finalizer_calls_have_outward_exception_edges() {
+    let source = br#"
+unit OutwardExceptions;
+interface
+implementation
+
+procedure HandlerThrows;
+begin
+  try
+    raise Exception.Create('body');
+  except
+    HandlerThrowsCall();
+  end;
+end;
+
+procedure FinalizerThrows;
+begin
+  try
+    ProtectedWork();
+  finally
+    FinalizerThrowsCall();
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let handler_cfg = cfg_for(&cfgs, "HandlerThrows");
+    let handler_call = block_with_stmt(handler_cfg, &source, "statement", "HandlerThrowsCall");
+    assert!(
+        successors(handler_cfg, handler_call)
+            .iter()
+            .any(|(target, kind)| *target == handler_cfg.exit && *kind == EdgeKind::ExceptionThrow),
+        "calls in handlers must propagate outward"
+    );
+
+    let finalizer_cfg = cfg_for(&cfgs, "FinalizerThrows");
+    let finalizer_calls =
+        blocks_with_stmt(finalizer_cfg, &source, "statement", "FinalizerThrowsCall");
+    assert!(!finalizer_calls.is_empty());
+    for finalizer_call in finalizer_calls {
+        assert!(
+            successors(finalizer_cfg, finalizer_call)
+                .iter()
+                .any(|(target, kind)| *target == finalizer_cfg.exit
+                    && *kind == EdgeKind::ExceptionThrow),
+            "calls in finalizers must propagate outward"
+        );
+    }
+}
+
+#[test]
+fn exit_argument_exception_is_preserved_through_finally() {
+    let source = br#"
+unit ExitArgumentException;
+interface
+implementation
+
+procedure ExitArgumentException;
+begin
+  try
+    Exit(ThrowingValue());
+  finally
+    CleanupExitArgument();
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ExitArgumentException");
+
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit(ThrowingValue");
+    let cleanup_blocks = blocks_with_stmt(cfg, &source, "statement", "CleanupExitArgument");
+    assert!(
+        cleanup_blocks.len() >= 2,
+        "Exit completion and argument evaluation need separate cleanup paths"
+    );
+    let cleanup_targets: HashSet<BlockId> = cleanup_blocks.into_iter().collect();
+    let cleanup_successors: Vec<(BlockId, EdgeKind)> = successors(cfg, exit_stmt)
+        .into_iter()
+        .filter(|(target, _)| cleanup_targets.contains(target))
+        .collect();
+    assert!(
+        cleanup_successors
+            .iter()
+            .any(|(_, kind)| *kind == EdgeKind::FinallyEntry),
+        "the Exit transfer must enter finally"
+    );
+    assert!(
+        cleanup_successors
+            .iter()
+            .any(|(_, kind)| *kind == EdgeKind::ExceptionThrow),
+        "an exception while evaluating Exit's argument must enter finally"
+    );
+}

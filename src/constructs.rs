@@ -43,6 +43,25 @@ pub(crate) fn is_exit_call(node: Node, source: &[u8]) -> bool {
     }
 }
 
+/// Check whether an `Exit` call evaluates an argument before completing.
+///
+/// The argument expression is part of the protected computation, so it may
+/// produce an exceptional completion independently of the explicit `Exit`
+/// transfer. A bare `Exit;` has no such additional computation.
+pub(crate) fn exit_has_argument(node: Node, source: &[u8]) -> bool {
+    match node.kind() {
+        "statement" => {
+            let mut cursor = node.walk();
+            let has_argument = node
+                .children(&mut cursor)
+                .any(|child| exit_has_argument(child, source));
+            has_argument
+        }
+        "exprCall" => is_exit_call(node, source) && node.child_by_field_name("args").is_some(),
+        _ => false,
+    }
+}
+
 /// Check whether a node represents a call to `Break`.
 pub(crate) fn is_break_call(node: Node, source: &[u8]) -> bool {
     match node.kind() {

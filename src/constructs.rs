@@ -16,17 +16,14 @@ pub(crate) fn node_text(node: Node, source: &[u8]) -> String {
 pub(crate) fn is_exit_call(node: Node, source: &[u8]) -> bool {
     match node.kind() {
         "statement" => {
-            // statement wrapping an identifier
+            // A statement wraps the expression for both `Exit;` and
+            // `Exit(value);`. Delegate to the expression classifier so the
+            // latter is not mistaken for an ordinary fallthrough statement.
             let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    let text = node_text(child, source);
-                    if text.eq_ignore_ascii_case("exit") {
-                        return true;
-                    }
-                }
-            }
-            false
+            let is_exit = node
+                .children(&mut cursor)
+                .any(|child| is_exit_call(child, source));
+            is_exit
         }
         "identifier" => {
             let text = node_text(node, source);

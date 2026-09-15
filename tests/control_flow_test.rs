@@ -245,3 +245,34 @@ end.
     );
     assert!(!can_reach(raise_cfg, raise_stmt, after_try));
 }
+
+#[test]
+fn exit_with_value_inside_statement_wrapper_terminates_function() {
+    let source = br#"
+unit WrappedExit;
+interface
+implementation
+
+function ExitWithValue(Value: Integer): Integer;
+begin
+  if Value > 0 then
+    Exit(Value);
+  Result := 1;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ExitWithValue");
+
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit(Value)");
+    let result_assignment = block_with_stmt(cfg, &source, "assignment", "Result := 1");
+    assert_eq!(
+        successors(cfg, exit_stmt),
+        vec![(cfg.exit, EdgeKind::Normal)],
+        "Exit(value) wrapped in a statement node must terminate the function"
+    );
+    assert!(!can_reach(cfg, exit_stmt, result_assignment));
+}

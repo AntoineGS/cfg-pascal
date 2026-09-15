@@ -350,6 +350,7 @@ module.exports = grammar({
 		// ppBlock can appear in statement contexts; `;` inside ppBlock is
 		// ambiguous with the `;` that separates statements.
 		[$._statement, $.ppBlock],
+		[$._statement, $._ppStatementBlock],
 		// ppBlock in declaration contexts causes ambiguity with var/type/const
 		// section keywords that can also start statements or decl items.
 		[$.varAssignDef, $.varDef, $.declVars],
@@ -448,14 +449,26 @@ module.exports = grammar({
 		label:           $ => seq(choice($.identifier, $.labelNumber), ':'),
 		caseLabel:       $ => seq(delimited1(choice($._expr, $.range)), ':'),
 
-		_statements:     $ => repeat1(choice($.varDef, $._statement, $.label, $.ppBlock, $.ppFragmentStmt)),
+		_statements:     $ => repeat1(choice(
+			$.varDef, $._statement, $.label,
+			alias($._ppStatementBlock, $.ppBlock), $.ppFragmentStmt
+		)),
 		_statementsTr:   $ => choice(
 			seq(
-				repeat(choice($._statement, $.label, $.ppBlock, $.ppFragmentStmt)),
-				choice(tr($,'_statement'), $._statement, $.ppBlock, $.ppFragmentStmt)
+				repeat(choice(
+					$._statement, $.label,
+					alias($._ppStatementBlock, $.ppBlock), $.ppFragmentStmt
+				)),
+				choice(
+					tr($,'_statement'), $._statement,
+					alias($._ppStatementBlock, $.ppBlock), $.ppFragmentStmt
+				)
 			),
 			seq(
-				repeat(choice($._statement, $.label, $.ppBlock, $.ppFragmentStmt)),
+				repeat(choice(
+					$._statement, $.label,
+					alias($._ppStatementBlock, $.ppBlock), $.ppFragmentStmt
+				)),
 				repeat1($.label)
 			)
 		),
@@ -727,7 +740,7 @@ module.exports = grammar({
 		_unitDefinitions: $ => repeat1(choice(
 			$.declTypes, $.declVars, $.declConsts, $.defProc,
 			alias($.declProcFwd, $.declProc),
-			$.declLabels, $.declUses, $.declExports
+			$.declLabels, $.declUses, $.declExports, $.ppBlock
 		)),
 		_definition:     $ => choice(
 			$.declTypes, $.declVars, $.declConsts, $.defProc,
@@ -820,6 +833,16 @@ module.exports = grammar({
 			// Nested ppBlock
 			$.ppBlock,
 			// Punctuation between items
+			';', ','
+		),
+		// Keep statement-context pp blocks separate from declaration pp blocks:
+		// an identifier followed by ':' is a label here, but can be a variable
+		// declaration in a declaration context.
+		_ppStatementBlock: $ => ppIn($,
+			$._statement,
+			$.label,
+			alias($._ppStatementBlock, $.ppBlock),
+			$.ppFragmentStmt,
 			';', ','
 		),
 		declExports:     $ => seq($.kExports, delimited($.declExport), ';'),

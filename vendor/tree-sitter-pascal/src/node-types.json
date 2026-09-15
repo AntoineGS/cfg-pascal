@@ -6334,6 +6334,10 @@
         {
           "type": "kImplementation",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
@@ -7111,6 +7115,10 @@
           "named": true
         },
         {
+          "type": "label",
+          "named": true
+        },
+        {
           "type": "ppBlock",
           "named": true
         },
@@ -7120,6 +7128,10 @@
         },
         {
           "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
           "named": true
         },
         {

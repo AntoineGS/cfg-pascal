@@ -572,6 +572,38 @@ end.
 }
 
 #[test]
+fn case_selector_reference_skips_parser_extras() {
+    let source = br#"
+unit CaseSelectorExtra;
+interface
+implementation
+
+procedure CaseSelectorExtra;
+begin
+  case { rationale } SelectorCall() of
+    1: Arm;
+  else
+    DefaultArm;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "CaseSelectorExtra");
+    let selector = block_with_stmt(cfg, &source, "case", "case");
+    let selector_ref = cfg.graph[selector.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "case")
+        .expect("case selector reference");
+    let selector_text = std::str::from_utf8(&source[selector_ref.byte_range.clone()]).unwrap();
+    assert!(selector_text.contains("SelectorCall()"));
+}
+
+#[test]
 fn cloned_cleanup_gotos_stay_in_their_own_instance() {
     let source = br#"
 unit ClonedCleanupGotos;

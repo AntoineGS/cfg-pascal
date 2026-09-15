@@ -640,10 +640,11 @@ fn handle_with(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
 fn case_selector<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     let selector = node.named_children(&mut cursor).find(|child| {
-        !matches!(
-            child.kind(),
-            "caseCase" | "kCase" | "kOf" | "kElse" | "kEnd"
-        )
+        !child.is_extra()
+            && !matches!(
+                child.kind(),
+                "caseCase" | "kCase" | "kOf" | "kElse" | "kEnd"
+            )
     });
     selector
 }

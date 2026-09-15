@@ -89,15 +89,49 @@ function pp($, ...rule) {
 		choice(
 			seq(...rule),
 			seq(
-				alias(/\{\$if[^}]*\}/i, $.pp),
+				alias(token(prec(5, /\{\$if[^}]*\}/i)), $.ppIf),
 				...rule,
 				repeat(seq(
-					alias(/\{\$else[^}]*\}/i, $.pp),
+					alias(token(prec(5, /\{\$else[^}]*\}/i)), $.ppElse),
 					...rule
 				)),
-				alias(/\{\$end[^}]*\}/i, $.pp)
+				alias(token(prec(5, /\{\$(endif|ifend)[^}]*\}/i)), $.ppEndIf)
 			),
 		)
+	);
+}
+
+function ppAttribute($, rule) {
+	if (!use_pp)
+		return rule;
+	return choice(
+		rule,
+		seq(
+			alias($._ppIf, $.ppIf),
+			rule,
+			repeat(seq(
+				alias($._ppElse, $.ppElse),
+				rule
+			)),
+			alias($._ppEndIf, $.ppEndIf)
+		)
+	);
+}
+
+// Preprocessor block wrapper for repeat contexts.
+// Generates a ppBlock node with structured ppIf/ppElse/ppEndIf children
+// wrapping the given content choices. Used in _declarations, _statements, etc.
+function ppIn($, ...contentChoices) {
+	if (!use_pp)
+		return choice(...contentChoices); // fallback: just the content
+	return seq(
+		alias($._ppIf, $.ppIf),
+		repeat(choice(...contentChoices)),
+		repeat(seq(
+			alias($._ppElse, $.ppElse),
+			repeat(choice(...contentChoices))
+		)),
+		alias($._ppEndIf, $.ppEndIf)
 	);
 }
 
@@ -162,7 +196,7 @@ function statements(trailing) {
 
 		[rn('foreach'),     $ => seq(
 			$.kFor,
-			field('iterator', $._expr), $.kIn,
+			field('iterator', choice($._expr, ...enable_if(delphi, $.varAssignDef))), $.kIn,
 			field('iterable', $._expr), $.kDo,
 			field('body', lastStatement($))
 		)],
@@ -213,7 +247,7 @@ function statements(trailing) {
 			repeat($.caseCase),
 			optional(tr($,'caseCase')),
 			optional(seq(
-				$.kElse,
+				choice($.kElse, ...enable_if(fpc, $.kOtherwise)),
 				optional(':'),
 				optional(tr($,'_statements'))
 			)),
@@ -285,7 +319,9 @@ function statements(trailing) {
 module.exports = grammar({
 	name: "pascal",
 
-	extras: $ => [$._space, $.comment, $.pp],
+	externals: $ => [$.ppFragmentExpr, $.ppFragmentStmt],
+
+	extras: $ => [$._space, $.comment, $.ppDirective],
 
 	word: $ => $.identifier,
 
@@ -311,6 +347,34 @@ module.exports = grammar({
 		// make sense, but for Treesitter it does), so we need another conflict
 		// here.
 		//...enable_if(lambda, [ $.lambda ]),
+		// ppBlock can appear in statement contexts; `;` inside ppBlock is
+		// ambiguous with the `;` that separates statements.
+		[$._statement, $.ppBlock],
+		// ppBlock in declaration contexts causes ambiguity with var/type/const
+		// section keywords that can also start statements or decl items.
+		[$.varAssignDef, $.varDef, $.declVars],
+		[$._ref, $._genericName],
+		[$._ref, $._genericName, $.declConst],
+		// exprTpl's template args are typerefs (not arbitrary expressions)
+		// so comma-separated literal lists like `IfThen(qty<0,-1,1)` can't
+		// be mistaken for a generic call. The `<` disambiguation still uses
+		// the tentative-node trick documented on exprTpl, but now the
+		// template parse dies as soon as a non-typeref appears, leaving
+		// exprBinary as the only survivor. Declaring the _ref/_typeref
+		// conflict is needed because both accept ppFragmentExpr.
+		[$._ref, $._typeref],
+		[$.defProc, $.ppBlock],
+		[$.exprBrackets, $.rttiAttributes],
+		[$._expr],
+		[$._expr, $.rttiAttributes],
+		[$._genericName, $.declConst],
+		[$.varDef, $.type],
+		[$.declVar, $.declField],
+		[$._declClass],
+		[$.declVar, $.declConst, $.declField],
+		[$.declVar, $.declConst],
+		[$.declSection],
+		[$.ppDeclSection],
 	],
 
 	rules: {
@@ -384,14 +448,14 @@ module.exports = grammar({
 		label:           $ => seq(choice($.identifier, $.labelNumber), ':'),
 		caseLabel:       $ => seq(delimited1(choice($._expr, $.range)), ':'),
 
-		_statements:     $ => repeat1(choice($.varDef, $._statement,  $.label)),
+		_statements:     $ => repeat1(choice($.varDef, $._statement, $.label, $.ppBlock, $.ppFragmentStmt)),
 		_statementsTr:   $ => choice(
 			seq(
-				repeat(choice($._statement, $.label)),
-				choice(tr($,'_statement'), $._statement)
+				repeat(choice($._statement, $.label, $.ppBlock, $.ppFragmentStmt)),
+				choice(tr($,'_statement'), $._statement, $.ppBlock, $.ppFragmentStmt)
 			),
 			seq(
-				repeat(choice($._statement, $.label)),
+				repeat(choice($._statement, $.label, $.ppBlock, $.ppFragmentStmt)),
 				repeat1($.label)
 			)
 		),
@@ -410,8 +474,16 @@ module.exports = grammar({
 		// EXPRESSIONS ---------------------------------------------------------
 
 		_expr:           $ => choice(
-			$._ref, $.exprBinary, $.exprUnary
+			$._ref, $.exprBinary, $.exprUnary,
+			...enable_if(delphi, $.exprConditional)
 		),
+
+		// Bind below binary operators and prefer ordinary if statements at block level.
+		exprConditional: $ => prec.right(-1, seq(
+			$.kIf, field('condition', $._expr),
+			$.kThen, field('then', $._expr),
+			$.kElse, field('else', $._expr)
+		)),
 
 		_ref:            $ => choice(
 			...enable_if(templates && fpc,
@@ -437,7 +509,8 @@ module.exports = grammar({
 			alias($.exprDeref, $.exprUnary),
 			alias($.exprAs, $.exprBinary),
 			...enable_if(templates, $.exprTpl),
-			...enable_if(lambda, $.lambda)
+			...enable_if(lambda, $.lambda),
+			$.ppFragmentExpr,
 		),
 
 		lambda:          $ => seq(
@@ -500,7 +573,7 @@ module.exports = grammar({
 		// template. Then the existing node is simply "renamed". Because of
 		// this, we can't have an extra node in only one of the branches.
 		//
-		exprTpl:         $ => op.args(5, $._ref, $.kLt, delimited1($._expr, ',', 5),  $.kGt),
+		exprTpl:         $ => prec.dynamic(1, op.args(5, $._ref, $.kLt, delimited1($._typeref, ',', 5),  $.kGt)),
 		exprSubscript:   $ => op.args(5, $._ref, '[',   $.exprArgs,  ']'  ),
 		exprCall:        $ => op.args(5, $._ref, '(',   optional($.exprArgs), ')'  ),
 
@@ -508,6 +581,8 @@ module.exports = grammar({
 		legacyFormat:    $ => repeat1(seq(':', $._expr)),
 
 		exprArgs:        $ => delimited1(seq($._expr, optional($.legacyFormat))),
+		// A separate reduction distinguishes `is not T` from `is (not T)`.
+		_exprIsNot:      $ => prec(5, seq($.kIs, $.kNot)),
 
 		exprBinary:      $ => choice(
 			op.infix(1, $._expr, $.kLt,  $._expr),
@@ -519,6 +594,10 @@ module.exports = grammar({
 			op.infix(1, $._expr, $.kGte, $._expr),
 			op.infix(1, $._expr, $.kIn,  $._expr),
 			op.infix(1, $._expr, $.kIs,  $._expr),
+			...enable_if(delphi,
+				op.infix(1, $._expr, seq($.kNot, $.kIn), $._expr),
+				op.infix(1, $._expr, $._exprIsNot, $._expr)
+			),
 
 			op.infix(2, $._expr, $.kAdd, $._expr),
 			op.infix(2, $._expr, $.kSub, $._expr),
@@ -559,18 +638,35 @@ module.exports = grammar({
 			$.declFile,
 			$.declString,
 			$.declProcRef,
+			$.declSubRange,
 		)),
+
+		// Pascal subrange type alias: `TDigit = 0..9;` or
+		// `TMultiPayProcs = sppShift4 .. sppTenderRetail;`. Bounds are
+		// narrowed (not full `_expr`) so that `type = '(' ident ')'` stays
+		// unambiguous against `declEnum`; in particular we exclude paren-
+		// wrapped expressions so `(` can only start a `declEnum`.
+		declSubRange:    $ => prec(1, seq(
+			$._subRangeBound, '..', $._subRangeBound
+		)),
+		_subRangeBound:  $ => choice(
+			$.literalNumber,
+			seq(choice('-', '+'), $.literalNumber),
+			$.literalString,
+			$._typeref,
+		),
 
 		typeref:         $ => seq(
 			...enable_if(fpc, field('_dummy', optional($.kSpecialize))),
 			$._typeref,
-			...enable_if(delphi, optional(seq($.kDeprecated, $._expr))),
+			...enable_if(delphi, optional(prec.right(seq($.kDeprecated, optional($._expr))))),
 		),
 
 		_typeref:        $ => choice(
 			$.identifier, $.typerefDot,
 			...enable_if(templates, $.typerefTpl),
 			$.typerefPtr,
+			$.ppFragmentExpr,
 		),
 
 		typerefDot:      $ => op.infix(1,$._typeref, $.kDot, $._typeref),
@@ -616,7 +712,8 @@ module.exports = grammar({
 		literalNumber:   $ => choice($._literalInt, $._literalFloat),
 		_literalInt:     $ => choice(
 			token.immediate(/[-+]?[0-9]+/),
-			token.immediate(/\$[a-fA-F0-9]+/)
+			token.immediate(/\$[a-fA-F0-9]+/),
+			...enable_if(fpc, token.immediate(/%[01]+/))
 		),
 		_literalFloat:   $ => prec(10, /[-+]?[0-9]*\.?[0-9]+(e[+-]?[0-9]+)?/),
 
@@ -636,6 +733,7 @@ module.exports = grammar({
 			$.declTypes, $.declVars, $.declConsts, $.defProc,
 			alias($.declProcFwd, $.declProc),
 			$.declLabels, $.declUses, $.declExports,
+			$.ppBlock,
 
 			// Not actually valid syntax, but helps the parser recover:
 			prec(-1,$.blockTr)
@@ -666,34 +764,81 @@ module.exports = grammar({
 		_declarations:   $ => repeat1(choice(
 			$.declTypes, $.declVars, $.declConsts, $.declProc, $.declProp,
 			alias($.declProcFwd, $.declProc),
-			$.declUses, $.declLabels, $.declExports
+			$.declUses, $.declLabels, $.declExports,
+			$.ppBlock
 		)),
 		_classDeclarations: $ => repeat1(choice(
-			$.declTypes, $.declVars, $.declConsts, $.declProc, $.declProp
+			$.declTypes, $.declVars, $.declConsts, $.declProc, $.declProp,
+			$.ppBlock
 		)),
 
 		defaultValue:    $ => seq($.kEq, $._initializer),
 
 		// Declaration sections
 
-		declUses:        $ => seq($.kUses, delimited($.moduleName), ';'),
+		declUses:        $ => seq($.kUses, choice(
+			seq(repeat1($._usesClauseEntry), ';'),
+			$.ppUsesBlockWithSemi
+		)),
+
+		_usesClauseEntry: $ => choice($.moduleName, $.ppUsesBlock, ','),
+
+		ppUsesBlock: $ => seq(
+			alias(token(prec(5, /\{\$(ifdef|ifndef|if)([^a-zA-Z_}][^}]*)?\}/i)), $.ppIf),
+			repeat(choice($.moduleName, $.ppUsesBlock, ',')),
+			repeat(seq(
+				alias(token(prec(5, /\{\$(elseif|else)([^a-zA-Z_}][^}]*)?\}/i)), $.ppElse),
+				repeat(choice($.moduleName, $.ppUsesBlock, ','))
+			)),
+			alias(token(prec(5, /\{\$(endif|ifend)([^a-zA-Z_}][^}]*)?\}/i)), $.ppEndIf)
+		),
+
+		ppUsesBlockWithSemi: $ => seq(
+			alias(token(prec(5, /\{\$(ifdef|ifndef|if)([^a-zA-Z_}][^}]*)?\}/i)), $.ppIf),
+			repeat(choice($.moduleName, $.ppUsesBlock, ',')), ';',
+			repeat(seq(
+				alias(token(prec(5, /\{\$(elseif|else)([^a-zA-Z_}][^}]*)?\}/i)), $.ppElse),
+				repeat(choice($.moduleName, $.ppUsesBlock, ',')), ';'
+			)),
+			alias(token(prec(5, /\{\$(endif|ifend)([^a-zA-Z_}][^}]*)?\}/i)), $.ppEndIf)
+		),
+		// Shared terminals let the parser distinguish a conditional attribute
+		// from a directive-wrapped class section using the following token.
+		_ppIf:    $ => token(prec(5, /\{\$(ifdef|ifndef|if)([^a-zA-Z_}][^}]*)?\}/i)),
+		_ppElse:  $ => token(prec(5, /\{\$(elseif|else)([^a-zA-Z_}][^}]*)?\}/i)),
+		_ppEndIf: $ => token(prec(5, /\{\$(endif|ifend)([^a-zA-Z_}][^}]*)?\}/i)),
+
+		ppBlock: $ => ppIn($,
+			// Declaration items
+			$.declType, $.declVar, $.declConst, $.declProc, $.declProp,
+			alias($.declProcFwd, $.declProc), $.declField,
+			// Section-level items
+			$.declTypes, $.declVars, $.declConsts, $.defProc,
+			$.declUses, $.declLabels, $.declExports,
+			// Statement items
+			$._statement,
+			// Nested ppBlock
+			$.ppBlock,
+			// Punctuation between items
+			';', ','
+		),
 		declExports:     $ => seq($.kExports, delimited($.declExport), ';'),
 
 		declTypes:       $ => seq(
 			$.kType,
-			repeat($.declType)
+			repeat(choice($.declType, $.ppBlock))
 		),
 
 		declVars:        $ => seq(
 			optional($.kClass),
 			choice($.kVar, $.kThreadvar),
-			repeat($.declVar)
+			repeat(choice($.declVar, $.ppBlock))
 		),
 
 		declConsts:      $ => seq(
 			optional($.kClass),
 			choice($.kConst, $.kResourcestring),
-			repeat($.declConst),
+			repeat(choice($.declConst, $.ppBlock)),
 		),
 
 		// Declarations
@@ -761,7 +906,8 @@ module.exports = grammar({
 		declFile:        $ => seq($.kFile, optional(seq($.kOf, $.type))),
 		declString:      $ => prec.left(seq(
 			$.kString,
-			optional(seq('[', choice($._expr), ']'))
+			optional(seq('[', choice($._expr), ']')),
+			...enable_if(delphi, optional(prec.right(seq($.kDeprecated, optional($._expr))))),
 		)),
 
 		declProcRef:     $ => prec.right(1,seq(
@@ -820,7 +966,7 @@ module.exports = grammar({
 		_declClass:      $ => seq(
 			optional($._declFields),
 			optional($._classDeclarations),
-			repeat($.declSection),
+			repeat(choice($.declSection, $.ppDeclSection)),
 			optional($.declVariant),
 			$.kEnd
 		),
@@ -832,7 +978,16 @@ module.exports = grammar({
 			optional($._classDeclarations)
 		),
 
-		_declFields:     $ => repeat1($.declField),
+		ppDeclSection:   $ => seq(
+			alias($._ppIf, $.ppIf),
+			optional($.kStrict),
+			choice($._visibility, ...enable_if(objc, $.kRequired, $.kOptional)),
+			alias($._ppEndIf, $.ppEndIf),
+			optional($._declFields),
+			optional($._classDeclarations)
+		),
+
+		_declFields:     $ => repeat1(choice($.declField, $.ppBlock)),
 
 		declField:       $ =>  seq(
 			...enable_if(rtti, optional($.rttiAttributes)),
@@ -849,8 +1004,7 @@ module.exports = grammar({
 			$.kProperty,
 			field('name', $.identifier),
 			field('args', optional($.declPropArgs)),
-			':',
-			field('type', $.type),
+			optional(seq(':', field('type', $.type))),
 			repeat(choice(
 				seq($.kIndex, field('index', $._expr)),
 				...enable_if(delphi, seq($.kDispId, field('dispid', $._expr))),
@@ -918,8 +1072,7 @@ module.exports = grammar({
 			field('name', $._operatorName),
 			field('args', optional($.declArgs)),
 			...enable_if(fpc, field('resultName', optional($.identifier))),
-			':',
-			field('type', $.type),
+			optional(seq(':', field('type', $.type))),
 			field('assign', optional($.defaultValue)),
 			';',
 			repeat($._procAttributeNoExt)
@@ -947,7 +1100,8 @@ module.exports = grammar({
 
 		declArg:         $ => choice(
 			seq(
-				choice($.kVar, $.kConst, $.kOut, $.kConstref),
+				choice($.kVar, $.kOut, $.kConstref,
+					seq($.kConst, ...enable_if(delphi, optional($.rttiAttributes)))),
 				field('name', delimited1($.identifier)),
 				optional(seq(
 					':', field('type', $.type),
@@ -972,11 +1126,11 @@ module.exports = grammar({
 				']', ';'
 			))
 		)/*)*/,
-		_procAttributeNoExt: $ => /*pp($,*/ choice(
-			seq(field('attribute', $.procAttribute), ';'),
+		_procAttributeNoExt: $ => choice(
+			seq(ppAttribute($, field('attribute', $.procAttribute)), ';'),
 			// FPC-specific syntax, e.g. procedure myproc; [public; alias:'bla'; cdecl];
 			...enable_if(fpc, seq('[', delimited(field('attribute', choice($.procAttribute)), ';'), ']', ';'))
-		)/*)*/,
+		),
 
 		procAttribute:   $ => choice(
 			$.kStatic, $.kVirtual, $.kDynamic, $.kAbstract, $.kOverride,
@@ -1141,6 +1295,7 @@ module.exports = grammar({
 		kIf:               $ => /if/i,
 		kThen:             $ => /then/i,
 		kElse:             $ => /else/i,
+		kOtherwise:        $ => /otherwise/i,
 		kDo:               $ => /do/i,
 		kWhile:            $ => /while/i,
 		kRepeat:           $ => /repeat/i,
@@ -1174,7 +1329,7 @@ module.exports = grammar({
 		kStatic:           $ => /static/i,
 		kVirtual:          $ => /virtual/i,
 		kAbstract:         $ => /abstract/i,
-		kSealed:           $ => /seled/i,
+		kSealed:           $ => /sealed/i,
 		kDynamic:          $ => /dynamic/i,
 		kOverride:         $ => /override/i,
 		kOverload:         $ => /overload/i,
@@ -1199,7 +1354,7 @@ module.exports = grammar({
 		kExport:           $ => /export/i,
 		kFar:              $ => /far/i,
 		kNear:             $ => /near/i,
-		kSafecall:         $ => /safecal/i,
+		kSafecall:         $ => /safecall/i,
 		kAssembler:        $ => /assembler/i,
 		kNostackframe:     $ => /nostackframe/i,
 		kInterrupt:        $ => /interrupt/i,
@@ -1224,15 +1379,11 @@ module.exports = grammar({
 		kTrue:             $ => /true/i,
 		kFalse:            $ => /false/i,
 
-		kIfdef:            $ => /ifdef/i,
-		kIfndef:           $ => /ifndef/i,
-		kEndif:            $ => /endif/i,
-
-		identifier:        $ => /[&]?[a-zA-Z_]+[0-9_a-zA-Z]*/,
+		identifier:        $ => /[&]?[a-zA-Z_]+[0-9_a-zA-Z$]*/,
 		labelNumber:       $ => token(prec(1, /[0-9]+/)),
 
 	  	_space:            $ => /[\s\r\n\t]+/,
-		pp:                $ => /\{\$[^}]*\}/,
+		ppDirective:       $ => token(prec(-1, /\{\$[^}]*\}/)),
 		comment:           $ => token(choice(
 			seq('//', /.*/),
 			seq('{', /([^$}][^}]*)?/, '}'),

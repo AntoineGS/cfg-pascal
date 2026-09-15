@@ -23,6 +23,7 @@
 (declType         name: (genericTpl entity: (identifier)     @local.definition))
 
 (declProc         name: (identifier)     @local.definition)
+
 (goto             (labelNumber)          @local.reference)
 
 (identifier)                             @local.reference

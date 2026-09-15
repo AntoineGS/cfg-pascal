@@ -723,3 +723,31 @@ end;
     (block
       (kBegin)
       (kEnd))))
+
+===
+Declaration hints on type and string fields
+===
+
+type
+  TFoo = class
+    fA: Integer deprecated;
+    fB: Integer deprecated 'use something else';
+    fC: string deprecated;
+    fD: string deprecated 'use something else';
+  end;
+
+---
+
+(root
+  (declTypes (kType)
+    (declType (identifier) (kEq)
+      (declClass (kClass)
+        (declField (identifier)
+          (type (typeref (identifier) (kDeprecated))))
+        (declField (identifier)
+          (type (typeref (identifier) (kDeprecated) (literalString))))
+        (declField (identifier)
+          (type (declString (kString) (kDeprecated))))
+        (declField (identifier)
+          (type (declString (kString) (kDeprecated) (literalString))))
+        (kEnd)))))

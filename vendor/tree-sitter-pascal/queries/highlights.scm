@@ -126,6 +126,7 @@
 	(kIf)
 	(kThen)
 	(kElse)
+	(kOtherwise)
 	(kDo)
 	(kWhile)
 	(kRepeat)
@@ -212,7 +213,7 @@
 
 ; -- Comments
 (comment)         @comment
-(pp)              @keyword
+[(ppIf) (ppElse) (ppEndIf) (ppDirective) (ppUsesBlock)] @keyword.directive
 
 ; -- Type declaration
 

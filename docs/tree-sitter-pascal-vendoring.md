@@ -1,21 +1,19 @@
 # Vendored Pascal parser
 
 `vendor/tree-sitter-pascal` is the minimal Rust package payload from the
-crates.io `tree-sitter-pascal` 0.10.2 release. Its parser, grammar JSON,
-node-types JSON, Rust binding, build script, queries, README, and MIT license
-were copied from the local Cargo registry source directory:
+MIT-licensed `AntoineGS/tree-sitter-pascal` 0.11.0 source at commit
+`2f95d9cd6af861b364dd73b7a99529a2c08300af`. Its parser, grammar JSON,
+node-types JSON, external scanner, Rust binding, build script, queries, README,
+and MIT license are copied from the exact tracked source at that commit:
 
 ```
-/home/antoinegs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-pascal-0.10.2
+https://github.com/AntoineGS/tree-sitter-pascal/tree/2f95d9cd6af861b364dd73b7a99529a2c08300af
 ```
 
-The payload matches the v0.10.2 source at
-`https://github.com/Isopod/tree-sitter-pascal` (source commit
-`042119eca2e18a60e56317fb06ee3ba5c32cb447`, grammar commit history; the
-registry package records git source `2f28b717be47cf592241e1b7bec3b2b906f59148`).
 The original upstream `LICENSE` is retained in the vendored package. The
-original grammar corpus was copied from the exact `v0.10.2` tag and lives under
-`vendor/tree-sitter-pascal/test/corpus`.
+upstream corpus is merged with cfg-pascal's regression corpus under
+`vendor/tree-sitter-pascal/test/corpus`; the upstream files are copied from the
+same commit rather than from an untracked sibling worktree.
 
 The crate dependency is a repository-relative path, so consumers do not need
 the developer's Cargo registry path. `cfg_pascal::LANGUAGE` is the language
@@ -26,16 +24,18 @@ already-parsed `tree_sitter::Tree` values remain source-compatible.
 
 ## Local grammar changes
 
-The vendored grammar starts at upstream 0.10.2. Task 1 adds only:
+The vendored grammar starts at upstream 0.11.0. Task 1 adds only:
 
 * decimal-only label tokens for declarations, definitions, and `goto`;
 * labeled single-statement prefixes, including named and numeric labels;
+* trailing-statement label separation so missing separators remain errors;
 * the legacy unit `begin..end.` initialization form;
-* an optional expression on `raise`, allowing `raise;` to parse.
+* the existing CFG-compatible AST aliases and field shapes where upstream
+  retained them. Bare `raise;` is already provided by upstream 0.11.0.
 
 Generated `src/parser.c`, `src/grammar.json`, and `src/node-types.json` must
-always be regenerated together with the pinned CLI. Do not edit those files by
-hand.
+always be regenerated together with the pinned CLI. The external scanner is
+compiled by `bindings/rust/build.rs`; do not edit generated artifacts by hand.
 
 ## Regeneration and corpus tests
 

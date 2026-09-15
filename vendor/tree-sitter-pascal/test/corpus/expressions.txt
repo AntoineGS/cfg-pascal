@@ -312,3 +312,40 @@ end;
             (identifier))))
 
       (kEnd))))
+
+
+===
+Comparison as call argument (no phantom generic)
+===
+
+procedure Main;
+begin
+  factor := IfThen(qty < 0, -1, 1);
+  x := Max(a > b, c);
+end;
+
+---
+
+(root
+  (defProc
+    (declProc (kProcedure) (identifier))
+    (block
+      (kBegin)
+      (assignment
+        (identifier)
+        (kAssign)
+        (exprCall
+          (identifier)
+          (exprArgs
+            (exprBinary (identifier) (kLt) (literalNumber))
+            (literalNumber)
+            (literalNumber))))
+      (assignment
+        (identifier)
+        (kAssign)
+        (exprCall
+          (identifier)
+          (exprArgs
+            (exprBinary (identifier) (kGt) (identifier))
+            (identifier))))
+      (kEnd))))

@@ -24,6 +24,10 @@
           "named": true
         },
         {
+          "type": "exprConditional",
+          "named": true
+        },
+        {
           "type": "exprDot",
           "named": true
         },
@@ -77,6 +81,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         },
         {
@@ -145,6 +153,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -198,6 +210,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           },
           {
@@ -249,6 +265,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -302,6 +322,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -362,6 +386,14 @@
         },
         {
           "type": "label",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
           "named": true
         },
         {
@@ -452,6 +484,14 @@
           "named": true
         },
         {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
+          "named": true
+        },
+        {
           "type": "raise",
           "named": true
         },
@@ -520,6 +560,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -595,6 +639,10 @@
           "named": true
         },
         {
+          "type": "kOtherwise",
+          "named": true
+        },
+        {
           "type": "kSpecialize",
           "named": true
         },
@@ -616,6 +664,18 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
           "named": true
         },
         {
@@ -764,6 +824,10 @@
           "named": true
         },
         {
+          "type": "exprConditional",
+          "named": true
+        },
+        {
           "type": "exprDot",
           "named": true
         },
@@ -820,6 +884,10 @@
           "named": true
         },
         {
+          "type": "ppFragmentExpr",
+          "named": true
+        },
+        {
           "type": "range",
           "named": true
         }
@@ -866,7 +934,7 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": false,
       "types": [
         {
@@ -883,6 +951,10 @@
         },
         {
           "type": "kVar",
+          "named": true
+        },
+        {
+          "type": "rttiAttributes",
           "named": true
         }
       ]
@@ -921,6 +993,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -989,6 +1065,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         },
         {
@@ -1075,6 +1155,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -1180,6 +1264,18 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppDeclSection",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -1267,6 +1363,10 @@
         {
           "type": "kResourcestring",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
@@ -1330,6 +1430,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -1402,6 +1506,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         }
       ]
@@ -1587,6 +1695,14 @@
           "named": true
         },
         {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppDeclSection",
+          "named": true
+        },
+        {
           "type": "typeref",
           "named": true
         }
@@ -1680,6 +1796,14 @@
         },
         {
           "type": "kPacked",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppDeclSection",
           "named": true
         }
       ]
@@ -1869,6 +1993,18 @@
           "named": true
         },
         {
+          "type": "ppElse",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
+          "named": true
+        },
+        {
           "type": "procExternal",
           "named": true
         },
@@ -1980,6 +2116,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -2033,6 +2173,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -2054,6 +2198,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -2107,6 +2255,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -2142,6 +2294,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -2195,6 +2351,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -2216,6 +2376,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -2269,6 +2433,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -2310,6 +2478,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -2364,12 +2536,16 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       },
       "type": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "type",
@@ -2503,6 +2679,10 @@
         {
           "type": "kStrict",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
@@ -2551,6 +2731,10 @@
           "named": true
         },
         {
+          "type": "exprConditional",
+          "named": true
+        },
+        {
           "type": "exprDot",
           "named": true
         },
@@ -2576,6 +2760,10 @@
         },
         {
           "type": "inherited",
+          "named": true
+        },
+        {
+          "type": "kDeprecated",
           "named": true
         },
         {
@@ -2608,6 +2796,49 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "declSubRange",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "literalNumber",
+          "named": true
+        },
+        {
+          "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
+        },
+        {
+          "type": "typerefDot",
+          "named": true
+        },
+        {
+          "type": "typerefPtr",
+          "named": true
+        },
+        {
+          "type": "typerefTpl",
           "named": true
         }
       ]
@@ -2710,6 +2941,10 @@
         {
           "type": "kType",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
@@ -2728,6 +2963,14 @@
         },
         {
           "type": "moduleName",
+          "named": true
+        },
+        {
+          "type": "ppUsesBlock",
+          "named": true
+        },
+        {
+          "type": "ppUsesBlockWithSemi",
           "named": true
         }
       ]
@@ -2863,6 +3106,10 @@
           "named": true
         },
         {
+          "type": "ppFragmentExpr",
+          "named": true
+        },
+        {
           "type": "procExternal",
           "named": true
         },
@@ -2967,6 +3214,10 @@
         {
           "type": "kVar",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
@@ -3038,6 +3289,10 @@
           {
             "type": "defProc",
             "named": true
+          },
+          {
+            "type": "ppBlock",
+            "named": true
           }
         ]
       }
@@ -3047,7 +3302,15 @@
       "required": false,
       "types": [
         {
-          "type": "pp",
+          "type": "ppElse",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
           "named": true
         }
       ]
@@ -3075,6 +3338,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -3135,6 +3402,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         },
         {
@@ -3374,6 +3645,10 @@
           "named": true
         },
         {
+          "type": "exprConditional",
+          "named": true
+        },
+        {
           "type": "exprDot",
           "named": true
         },
@@ -3432,6 +3707,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -3454,6 +3733,10 @@
           },
           {
             "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
             "named": true
           },
           {
@@ -3511,11 +3794,15 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       },
       "operator": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
           {
@@ -3579,6 +3866,10 @@
             "named": true
           },
           {
+            "type": "kNot",
+            "named": true
+          },
+          {
             "type": "kOr",
             "named": true
           },
@@ -3614,6 +3905,10 @@
           },
           {
             "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
             "named": true
           },
           {
@@ -3671,6 +3966,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -3694,6 +3993,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -3750,6 +4053,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         },
         {
@@ -3844,9 +4151,283 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
+    }
+  },
+  {
+    "type": "exprConditional",
+    "named": true,
+    "fields": {
+      "condition": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "exprBinary",
+            "named": true
+          },
+          {
+            "type": "exprBrackets",
+            "named": true
+          },
+          {
+            "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
+            "type": "exprDot",
+            "named": true
+          },
+          {
+            "type": "exprParens",
+            "named": true
+          },
+          {
+            "type": "exprSubscript",
+            "named": true
+          },
+          {
+            "type": "exprTpl",
+            "named": true
+          },
+          {
+            "type": "exprUnary",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "inherited",
+            "named": true
+          },
+          {
+            "type": "kFalse",
+            "named": true
+          },
+          {
+            "type": "kNil",
+            "named": true
+          },
+          {
+            "type": "kSpecialize",
+            "named": true
+          },
+          {
+            "type": "kTrue",
+            "named": true
+          },
+          {
+            "type": "lambda",
+            "named": true
+          },
+          {
+            "type": "literalNumber",
+            "named": true
+          },
+          {
+            "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
+          }
+        ]
+      },
+      "else": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "exprBinary",
+            "named": true
+          },
+          {
+            "type": "exprBrackets",
+            "named": true
+          },
+          {
+            "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
+            "type": "exprDot",
+            "named": true
+          },
+          {
+            "type": "exprParens",
+            "named": true
+          },
+          {
+            "type": "exprSubscript",
+            "named": true
+          },
+          {
+            "type": "exprTpl",
+            "named": true
+          },
+          {
+            "type": "exprUnary",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "inherited",
+            "named": true
+          },
+          {
+            "type": "kFalse",
+            "named": true
+          },
+          {
+            "type": "kNil",
+            "named": true
+          },
+          {
+            "type": "kSpecialize",
+            "named": true
+          },
+          {
+            "type": "kTrue",
+            "named": true
+          },
+          {
+            "type": "lambda",
+            "named": true
+          },
+          {
+            "type": "literalNumber",
+            "named": true
+          },
+          {
+            "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
+          }
+        ]
+      },
+      "then": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "exprBinary",
+            "named": true
+          },
+          {
+            "type": "exprBrackets",
+            "named": true
+          },
+          {
+            "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
+            "type": "exprDot",
+            "named": true
+          },
+          {
+            "type": "exprParens",
+            "named": true
+          },
+          {
+            "type": "exprSubscript",
+            "named": true
+          },
+          {
+            "type": "exprTpl",
+            "named": true
+          },
+          {
+            "type": "exprUnary",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "inherited",
+            "named": true
+          },
+          {
+            "type": "kFalse",
+            "named": true
+          },
+          {
+            "type": "kNil",
+            "named": true
+          },
+          {
+            "type": "kSpecialize",
+            "named": true
+          },
+          {
+            "type": "kTrue",
+            "named": true
+          },
+          {
+            "type": "lambda",
+            "named": true
+          },
+          {
+            "type": "literalNumber",
+            "named": true
+          },
+          {
+            "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "kElse",
+          "named": true
+        },
+        {
+          "type": "kIf",
+          "named": true
+        },
+        {
+          "type": "kThen",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -3923,6 +4504,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -4008,6 +4593,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -4031,6 +4620,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -4087,6 +4680,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         }
       ]
@@ -4177,6 +4774,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -4195,71 +4796,23 @@
             "named": false
           },
           {
-            "type": "exprBinary",
-            "named": true
-          },
-          {
-            "type": "exprBrackets",
-            "named": true
-          },
-          {
-            "type": "exprCall",
-            "named": true
-          },
-          {
-            "type": "exprDot",
-            "named": true
-          },
-          {
-            "type": "exprParens",
-            "named": true
-          },
-          {
-            "type": "exprSubscript",
-            "named": true
-          },
-          {
-            "type": "exprTpl",
-            "named": true
-          },
-          {
-            "type": "exprUnary",
-            "named": true
-          },
-          {
             "type": "identifier",
             "named": true
           },
           {
-            "type": "inherited",
+            "type": "ppFragmentExpr",
             "named": true
           },
           {
-            "type": "kFalse",
+            "type": "typerefDot",
             "named": true
           },
           {
-            "type": "kNil",
+            "type": "typerefPtr",
             "named": true
           },
           {
-            "type": "kSpecialize",
-            "named": true
-          },
-          {
-            "type": "kTrue",
-            "named": true
-          },
-          {
-            "type": "lambda",
-            "named": true
-          },
-          {
-            "type": "literalNumber",
-            "named": true
-          },
-          {
-            "type": "literalString",
+            "type": "typerefTpl",
             "named": true
           }
         ]
@@ -4335,6 +4888,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -4372,6 +4929,10 @@
           },
           {
             "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
             "named": true
           },
           {
@@ -4428,6 +4989,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -4510,6 +5075,14 @@
         },
         {
           "type": "label",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
           "named": true
         },
         {
@@ -4642,6 +5215,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -4695,6 +5272,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -4832,6 +5413,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -4885,6 +5470,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -4906,6 +5495,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -4959,6 +5552,14 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
+          },
+          {
+            "type": "varAssignDef",
             "named": true
           }
         ]
@@ -5244,6 +5845,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -5266,6 +5871,10 @@
           },
           {
             "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
             "named": true
           },
           {
@@ -5322,6 +5931,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -5441,6 +6054,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -5494,6 +6111,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -5789,6 +6410,14 @@
           "named": true
         },
         {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
+          "named": true
+        },
+        {
           "type": "raise",
           "named": true
         },
@@ -5862,9 +6491,18 @@
         {
           "type": "kInterface",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
+  },
+  {
+    "type": "kAdd",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "kDot",
@@ -5873,6 +6511,11 @@
   },
   {
     "type": "kEndDot",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "kSub",
     "named": true,
     "fields": {}
   },
@@ -6041,6 +6684,10 @@
           {
             "type": "defProc",
             "named": true
+          },
+          {
+            "type": "ppBlock",
+            "named": true
           }
         ]
       },
@@ -6088,6 +6735,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -6144,6 +6795,10 @@
         },
         {
           "type": "literalString",
+          "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
           "named": true
         }
       ]
@@ -6211,6 +6866,10 @@
         },
         {
           "type": "moduleName",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
           "named": true
         }
       ]
@@ -6356,6 +7015,301 @@
     }
   },
   {
+    "type": "ppBlock",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "asm",
+          "named": true
+        },
+        {
+          "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "case",
+          "named": true
+        },
+        {
+          "type": "declConst",
+          "named": true
+        },
+        {
+          "type": "declConsts",
+          "named": true
+        },
+        {
+          "type": "declExports",
+          "named": true
+        },
+        {
+          "type": "declField",
+          "named": true
+        },
+        {
+          "type": "declLabels",
+          "named": true
+        },
+        {
+          "type": "declProc",
+          "named": true
+        },
+        {
+          "type": "declProp",
+          "named": true
+        },
+        {
+          "type": "declType",
+          "named": true
+        },
+        {
+          "type": "declTypes",
+          "named": true
+        },
+        {
+          "type": "declUses",
+          "named": true
+        },
+        {
+          "type": "declVar",
+          "named": true
+        },
+        {
+          "type": "declVars",
+          "named": true
+        },
+        {
+          "type": "defProc",
+          "named": true
+        },
+        {
+          "type": "for",
+          "named": true
+        },
+        {
+          "type": "foreach",
+          "named": true
+        },
+        {
+          "type": "goto",
+          "named": true
+        },
+        {
+          "type": "if",
+          "named": true
+        },
+        {
+          "type": "ifElse",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppElse",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
+          "named": true
+        },
+        {
+          "type": "raise",
+          "named": true
+        },
+        {
+          "type": "repeat",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "try",
+          "named": true
+        },
+        {
+          "type": "varDef",
+          "named": true
+        },
+        {
+          "type": "while",
+          "named": true
+        },
+        {
+          "type": "with",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "ppDeclSection",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "declConsts",
+          "named": true
+        },
+        {
+          "type": "declField",
+          "named": true
+        },
+        {
+          "type": "declProc",
+          "named": true
+        },
+        {
+          "type": "declProp",
+          "named": true
+        },
+        {
+          "type": "declTypes",
+          "named": true
+        },
+        {
+          "type": "declVars",
+          "named": true
+        },
+        {
+          "type": "kOptional",
+          "named": true
+        },
+        {
+          "type": "kPrivate",
+          "named": true
+        },
+        {
+          "type": "kProtected",
+          "named": true
+        },
+        {
+          "type": "kPublic",
+          "named": true
+        },
+        {
+          "type": "kPublished",
+          "named": true
+        },
+        {
+          "type": "kRequired",
+          "named": true
+        },
+        {
+          "type": "kStrict",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "ppElse",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "ppEndIf",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "ppIf",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "ppUsesBlock",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "moduleName",
+          "named": true
+        },
+        {
+          "type": "ppElse",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
+          "named": true
+        },
+        {
+          "type": "ppUsesBlock",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "ppUsesBlockWithSemi",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "moduleName",
+          "named": true
+        },
+        {
+          "type": "ppElse",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
+          "named": true
+        },
+        {
+          "type": "ppUsesBlock",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "procAttribute",
     "named": true,
     "fields": {
@@ -6373,6 +7327,10 @@
           },
           {
             "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
             "named": true
           },
           {
@@ -6434,6 +7392,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -6452,6 +7414,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -6689,6 +7655,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -6711,6 +7681,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -6784,6 +7758,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -6847,6 +7825,10 @@
         {
           "type": "moduleName",
           "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
         }
       ]
     }
@@ -6869,6 +7851,10 @@
           },
           {
             "type": "exprCall",
+            "named": true
+          },
+          {
+            "type": "exprConditional",
             "named": true
           },
           {
@@ -6926,6 +7912,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -6959,6 +7949,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -7016,6 +8010,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -7070,6 +8068,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -7123,6 +8125,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           },
           {
@@ -7164,6 +8170,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -7217,6 +8227,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -7284,6 +8298,10 @@
         },
         {
           "type": "library",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
           "named": true
         },
         {
@@ -7372,6 +8390,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -7394,6 +8416,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -7451,6 +8477,10 @@
         {
           "type": "literalString",
           "named": true
+        },
+        {
+          "type": "ppFragmentExpr",
+          "named": true
         }
       ]
     }
@@ -7501,6 +8531,14 @@
         },
         {
           "type": "label",
+          "named": true
+        },
+        {
+          "type": "ppBlock",
+          "named": true
+        },
+        {
+          "type": "ppFragmentStmt",
           "named": true
         },
         {
@@ -7637,7 +8675,19 @@
           "named": true
         },
         {
-          "type": "pp",
+          "type": "declSubRange",
+          "named": true
+        },
+        {
+          "type": "ppElse",
+          "named": true
+        },
+        {
+          "type": "ppEndIf",
+          "named": true
+        },
+        {
+          "type": "ppIf",
           "named": true
         },
         {
@@ -7676,6 +8726,10 @@
         },
         {
           "type": "exprCall",
+          "named": true
+        },
+        {
+          "type": "exprConditional",
           "named": true
         },
         {
@@ -7739,6 +8793,10 @@
           "named": true
         },
         {
+          "type": "ppFragmentExpr",
+          "named": true
+        },
+        {
           "type": "typerefDot",
           "named": true
         },
@@ -7766,6 +8824,10 @@
           "named": true
         },
         {
+          "type": "ppFragmentExpr",
+          "named": true
+        },
+        {
           "type": "typerefDot",
           "named": true
         },
@@ -7790,6 +8852,10 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           },
           {
@@ -7825,6 +8891,10 @@
             "named": true
           },
           {
+            "type": "ppFragmentExpr",
+            "named": true
+          },
+          {
             "type": "typerefDot",
             "named": true
           },
@@ -7850,6 +8920,10 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           },
           {
@@ -7898,6 +8972,10 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           },
           {
@@ -8136,6 +9214,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -8189,6 +9271,10 @@
           },
           {
             "type": "literalString",
+            "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
             "named": true
           }
         ]
@@ -8308,6 +9394,10 @@
             "named": true
           },
           {
+            "type": "exprConditional",
+            "named": true
+          },
+          {
             "type": "exprDot",
             "named": true
           },
@@ -8362,6 +9452,10 @@
           {
             "type": "literalString",
             "named": true
+          },
+          {
+            "type": "ppFragmentExpr",
+            "named": true
           }
         ]
       }
@@ -8394,7 +9488,15 @@
     "named": false
   },
   {
+    "type": "+",
+    "named": false
+  },
+  {
     "type": ",",
+    "named": false
+  },
+  {
+    "type": "-",
     "named": false
   },
   {
@@ -8435,10 +9537,6 @@
   },
   {
     "type": "kAbstract",
-    "named": true
-  },
-  {
-    "type": "kAdd",
     "named": true
   },
   {
@@ -8822,6 +9920,10 @@
     "named": true
   },
   {
+    "type": "kOtherwise",
+    "named": true
+  },
+  {
     "type": "kOut",
     "named": true
   },
@@ -8962,10 +10064,6 @@
     "named": true
   },
   {
-    "type": "kSub",
-    "named": true
-  },
-  {
     "type": "kSysv_abi_cdecl",
     "named": true
   },
@@ -9054,7 +10152,15 @@
     "named": true
   },
   {
-    "type": "pp",
+    "type": "ppDirective",
+    "named": true
+  },
+  {
+    "type": "ppFragmentExpr",
+    "named": true
+  },
+  {
+    "type": "ppFragmentStmt",
     "named": true
   }
 ]

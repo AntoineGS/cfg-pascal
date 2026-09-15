@@ -183,3 +183,84 @@ end;
       (kBegin)
       (kEnd))))
 
+===
+Conditional method attributes
+===
+
+type
+  TConditional = class
+    procedure IfDefElse; {$IFDEF DELPHI_XE6_UP}reintroduce{$ELSE}override{$ENDIF};
+    procedure IfDefNoElse; {$IFDEF DELPHI_XE6_UP}reintroduce{$ENDIF};
+    procedure StandardThenConditional; virtual; {$IFDEF DELPHI_XE6_UP}reintroduce{$ELSE}override{$ENDIF};
+    procedure ConditionalThenStandard; {$IFDEF DELPHI_XE6_UP}reintroduce{$ELSE}override{$ENDIF}; overload;
+  end;
+
+---
+
+(root
+  (declTypes
+    (kType)
+    (declType
+      (identifier)
+      (kEq)
+      (declClass
+        (kClass)
+        (declProc
+          (kProcedure)
+          (identifier)
+          (ppIf)
+          (procAttribute (kReintroduce))
+          (ppElse)
+          (procAttribute (kOverride))
+          (ppEndIf))
+        (declProc
+          (kProcedure)
+          (identifier)
+          (ppIf)
+          (procAttribute (kReintroduce))
+          (ppEndIf))
+        (declProc
+          (kProcedure)
+          (identifier)
+          (procAttribute (kVirtual))
+          (ppIf)
+          (procAttribute (kReintroduce))
+          (ppElse)
+          (procAttribute (kOverride))
+          (ppEndIf))
+        (declProc
+          (kProcedure)
+          (identifier)
+          (ppIf)
+          (procAttribute (kReintroduce))
+          (ppElse)
+          (procAttribute (kOverride))
+          (ppEndIf)
+          (procAttribute (kOverload)))
+        (kEnd)))))
+
+===
+Conditional method attributes do not accept arbitrary expressions
+===
+
+type
+  TInvalid = class
+    procedure NotAnAttribute; {$IFDEF DELPHI_XE6_UP}not_an_attribute{$ENDIF};
+  end;
+
+---
+
+(ERROR
+  (kType)
+  (identifier)
+  (kEq)
+  (kClass)
+  (declProc
+    (kProcedure)
+    (identifier))
+  (ppIf)
+  (statement
+    (identifier)
+    (ppDirective))
+  (statement
+    (identifier)))

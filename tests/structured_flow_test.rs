@@ -403,6 +403,114 @@ end.
 }
 
 #[test]
+fn preprocessor_branch_labels_keep_local_and_external_targets() {
+    let source = br#"
+unit ConditionalLabels;
+interface
+implementation
+
+procedure BranchLocalLabels;
+label Done;
+begin
+  {$IFDEF FIRST}
+  goto Done;
+  Done: FirstBranch;
+  {$ELSEIF SECOND}
+  goto Done;
+  Done: SecondBranch;
+  {$ENDIF}
+end;
+
+procedure BranchExternalLabel;
+label Done;
+begin
+  {$IFDEF FIRST}
+  Done: FirstBranch;
+  {$ELSEIF SECOND}
+  Done: SecondBranch;
+  {$ENDIF}
+  goto Done;
+end;
+
+procedure BranchLabelCleanup;
+label Done;
+begin
+  {$IFDEF FIRST}
+  try
+    goto Done;
+    Done: FirstBranch;
+  finally
+    CleanupFirst;
+  end;
+  {$ELSEIF SECOND}
+  Done: SecondBranch;
+  {$ENDIF}
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let local_cfg = cfg_for(&cfgs, "BranchLocalLabels");
+    let local_gotos = blocks_with_stmt(local_cfg, &source, "goto", "goto Done");
+    let local_labels = blocks_with_stmt(local_cfg, &source, "label", "Done:");
+    assert_eq!(local_gotos.len(), 2);
+    assert_eq!(local_labels.len(), 2);
+    assert_eq!(
+        successors(local_cfg, local_gotos[0]),
+        vec![(local_labels[0], EdgeKind::Goto)],
+        "a branch-local goto must prefer the label declared in that same branch"
+    );
+    assert_eq!(
+        successors(local_cfg, local_gotos[1]),
+        vec![(local_labels[1], EdgeKind::Goto)],
+        "the alternate branch must resolve its own duplicate label"
+    );
+
+    let external_cfg = cfg_for(&cfgs, "BranchExternalLabel");
+    let external_goto = block_with_stmt(external_cfg, &source, "goto", "goto Done");
+    let external_labels = blocks_with_stmt(external_cfg, &source, "label", "Done:");
+    assert_eq!(external_labels.len(), 2);
+    let external_targets: HashSet<_> = successors(external_cfg, external_goto)
+        .into_iter()
+        .filter_map(|(target, kind)| (kind == EdgeKind::Goto).then_some(target))
+        .collect();
+    assert_eq!(
+        external_targets,
+        external_labels.into_iter().collect(),
+        "a goto outside the conditional must retain every feasible duplicate-label target"
+    );
+
+    let cleanup_cfg = cfg_for(&cfgs, "BranchLabelCleanup");
+    let cleanup_goto = block_with_stmt(cleanup_cfg, &source, "goto", "goto Done");
+    let cleanup_labels = blocks_with_stmt(cleanup_cfg, &source, "label", "Done:");
+    let first_cleanup_label = cleanup_labels
+        .iter()
+        .copied()
+        .find(|label| {
+            cleanup_cfg.graph[label.index()].stmts.iter().any(|stmt| {
+                stmt.node_kind == "statement"
+                    && std::str::from_utf8(&source[stmt.byte_range.clone()])
+                        .is_ok_and(|text| text.contains("FirstBranch"))
+            })
+        })
+        .expect("first branch label must be present");
+    assert_eq!(
+        successors(cleanup_cfg, cleanup_goto),
+        vec![(first_cleanup_label, EdgeKind::Goto)],
+        "a branch-local target inside try/finally must not be replaced by the alternate branch label"
+    );
+    assert!(
+        !successors(cleanup_cfg, cleanup_goto)
+            .iter()
+            .any(|(_, kind)| *kind == EdgeKind::FinallyEntry),
+        "a goto to its same-branch label must not unwind an unrelated cleanup scope"
+    );
+}
+
+#[test]
 fn preprocessor_statement_blocks_preserve_loop_controls_and_finally_labels() {
     let source = br#"
 unit ConditionalTransfers;

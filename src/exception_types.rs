@@ -39,10 +39,11 @@ pub(crate) enum TypeMatch {
 /// resolved.  The index is same-file only: missing, imported, shadowed,
 /// conditional, malformed, generic, `with`-implicit, and otherwise
 /// unsupported information stays unknown so CFG edges are never removed on
-/// an unproven assumption.  Every preprocessor directive is treated as an
-/// unresolved file-wide barrier because the grammar exposes directives as
-/// sibling extras rather than as ancestors of the declarations they affect;
-/// ordinary comments are not barriers.
+/// an unproven assumption. Every modern `pp*` node is treated as an
+/// unresolved file-wide barrier because the grammar may expose directives,
+/// conditional blocks, or preprocessor fragments as siblings rather than as
+/// ancestors of the declarations they affect; ordinary comments are not
+/// barriers.
 #[derive(Debug)]
 pub(crate) struct ExceptionTypeIndex {
     module_name: Option<String>,
@@ -274,8 +275,8 @@ impl ExceptionTypeIndex {
         source: &[u8],
         conditional: bool,
     ) {
-        let conditional = conditional || node.kind() == "pp";
-        if node.kind() == "pp" {
+        let conditional = conditional || is_preprocessor_kind(node.kind());
+        if is_preprocessor_kind(node.kind()) {
             self.has_preprocessor_barrier = true;
             self.unsupported_ranges
                 .push(node.start_byte()..node.end_byte());
@@ -1068,7 +1069,9 @@ impl ExceptionTypeIndex {
     }
 
     fn has_generic_syntax(&self, node: Node) -> bool {
-        if matches!(node.kind(), "genericTpl" | "typerefTpl" | "kGeneric" | "pp") {
+        if matches!(node.kind(), "genericTpl" | "typerefTpl" | "kGeneric")
+            || is_preprocessor_kind(node.kind())
+        {
             return true;
         }
         let mut cursor = node.walk();
@@ -1086,14 +1089,18 @@ fn extract_module_name(root: Node, source: &[u8]) -> Option<String> {
 }
 
 fn contains_preprocessor_directive(node: Node) -> bool {
-    if node.kind() == "pp" {
+    if is_preprocessor_kind(node.kind()) {
         return true;
     }
     let mut cursor = node.walk();
     let result = node
-        .named_children(&mut cursor)
+        .children(&mut cursor)
         .any(contains_preprocessor_directive);
     result
+}
+
+fn is_preprocessor_kind(kind: &str) -> bool {
+    kind.starts_with("pp")
 }
 
 fn constructor_parts(node: Node, source: &[u8]) -> Option<Vec<String>> {

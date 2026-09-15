@@ -507,6 +507,73 @@ end.
 }
 
 #[test]
+fn modern_preprocessor_directives_keep_successful_constructor_raises_unknown() {
+    let source = r#"
+unit ModernPreprocessorBarrier;
+interface
+implementation
+{$IFDEF MODERN}
+{$ENDIF}
+type
+  E = class constructor Create; end;
+procedure P;
+begin
+  try
+    raise E.Create;
+  except
+    on E do Handle;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let handler = block_with_stmt(cfg, source, "statement", "Handle");
+
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(successful_successors.contains(&(handler, EdgeKind::ExceptionThrow)));
+    assert!(
+        successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)),
+        "a modern preprocessor directive is a file-wide configuration barrier, including on the successful constructor path"
+    );
+}
+
+#[test]
+fn modern_preprocessor_blocks_make_conditional_exception_classes_unknown() {
+    let source = r#"
+unit ConditionalTypeBlock;
+interface
+{$IFDEF MODERN}
+type
+  E = class constructor Create; end;
+{$ENDIF}
+implementation
+procedure P;
+begin
+  try
+    raise E.Create;
+  except
+    on E do Handle;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let handler = block_with_stmt(cfg, source, "statement", "Handle");
+
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(successful_successors.contains(&(handler, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
 fn implicit_function_values_shadow_same_named_global_types() {
     assert_successful_raise_reaches(
         r#"

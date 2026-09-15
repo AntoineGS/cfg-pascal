@@ -591,6 +591,291 @@ end.\n"
 }
 
 #[test]
+fn pending_exit_does_not_skip_tail_cleanup_after_inner_finally() {
+    let source = br#"
+unit TailCleanupAfterInnerFinally;
+interface
+implementation
+
+procedure TailCleanupAfterInnerFinally;
+begin
+  try
+    Exit;
+  finally
+    try
+      InnerWork;
+    finally
+      InnerCleanup;
+    end;
+    TailCleanup;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "TailCleanupAfterInnerFinally");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit");
+    let inner_work = block_with_stmt(cfg, &source, "statement", "InnerWork");
+    let inner_cleanups = blocks_with_stmt(cfg, &source, "statement", "InnerCleanup");
+    let tail_cleanup = block_with_stmt(cfg, &source, "statement", "TailCleanup");
+
+    assert!(can_reach(cfg, exit_stmt, inner_work));
+    assert!(can_reach(cfg, exit_stmt, tail_cleanup));
+    assert!(
+        inner_cleanups.iter().any(|inner_cleanup| {
+            successors(cfg, *inner_cleanup).contains(&(tail_cleanup, EdgeKind::FinallyExit))
+        }),
+        "the inner finally must resume the outer finalizer body at TailCleanup"
+    );
+    assert!(can_reach(cfg, tail_cleanup, cfg.exit));
+}
+
+#[test]
+fn caught_inner_cleanup_exception_does_not_cancel_outer_exit() {
+    let source = br#"
+unit CaughtInnerCleanupException;
+interface
+implementation
+
+procedure CaughtInnerCleanupException;
+begin
+  try
+    if LeaveNow then
+      Exit;
+    Work;
+  finally
+    try
+      try
+        NestedWork;
+      finally
+        NestedCleanup;
+      end;
+    except
+      InnerHandler;
+    end;
+    TailCleanup;
+  end;
+  AfterTry;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "CaughtInnerCleanupException");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit");
+    let work_blocks = blocks_with_stmt(cfg, &source, "statement", "Work");
+    let nested_cleanups = blocks_with_stmt(cfg, &source, "statement", "NestedCleanup");
+    let inner_handlers = blocks_with_stmt(cfg, &source, "statement", "InnerHandler");
+    let tail_cleanups = blocks_with_stmt(cfg, &source, "statement", "TailCleanup");
+    let after_tries = blocks_with_stmt(cfg, &source, "statement", "AfterTry");
+
+    assert!(
+        work_blocks.iter().any(|work| after_tries
+            .iter()
+            .any(|after| can_reach(cfg, *work, *after))),
+        "the normal clone must catch the nested cleanup exception and continue"
+    );
+    assert!(
+        nested_cleanups.iter().any(|cleanup| {
+            inner_handlers
+                .iter()
+                .any(|handler| can_reach(cfg, *cleanup, *handler))
+        }),
+        "nested cleanup exceptions must reach the local handler"
+    );
+    assert!(
+        inner_handlers.iter().any(|handler| {
+            tail_cleanups
+                .iter()
+                .any(|tail| can_reach(cfg, *handler, *tail))
+        }),
+        "the local handler must resume at the tail cleanup"
+    );
+    assert!(
+        after_tries
+            .iter()
+            .all(|after| !can_reach(cfg, exit_stmt, *after)),
+        "a caught exception in cleanup must not cancel the pending Exit"
+    );
+    assert!(can_reach(cfg, exit_stmt, cfg.exit));
+}
+
+#[test]
+fn caught_cleanup_exceptions_preserve_normal_and_loop_transfers() {
+    let source = br#"
+unit CaughtCleanupTransfers;
+interface
+implementation
+
+procedure NormalCaught;
+begin
+  try
+    Work;
+  finally
+    try
+      try
+        NestedWork;
+      finally
+        NestedCleanup;
+      end;
+    except
+      InnerHandler;
+    end;
+    TailCleanup;
+  end;
+  AfterNormal;
+end;
+
+procedure ExitCaught;
+begin
+  try
+    if LeaveNow then
+      Exit;
+    Work;
+  finally
+    try
+      try
+        NestedWork;
+      finally
+        NestedCleanup;
+      end;
+    except
+      InnerHandler;
+    end;
+    TailCleanup;
+  end;
+  AfterExit;
+end;
+
+procedure BreakCaught;
+begin
+  while LoopCondition do
+  begin
+    try
+      Break;
+    finally
+      try
+        try
+          NestedWork;
+        finally
+          NestedCleanup;
+        end;
+      except
+        InnerHandler;
+      end;
+      TailCleanup;
+    end;
+  end;
+  AfterBreak;
+end;
+
+procedure ContinueCaught;
+begin
+  while LoopCondition do
+  begin
+    try
+      Continue;
+    finally
+      try
+        try
+          NestedWork;
+        finally
+          NestedCleanup;
+        end;
+      except
+        InnerHandler;
+      end;
+      TailCleanup;
+    end;
+  end;
+  AfterContinue;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let assert_local_catch = |cfg: &Cfg| {
+        let nested_cleanups = blocks_with_stmt(cfg, &source, "statement", "NestedCleanup");
+        let inner_handlers = blocks_with_stmt(cfg, &source, "statement", "InnerHandler");
+        let tail_cleanups = blocks_with_stmt(cfg, &source, "statement", "TailCleanup");
+        assert!(!nested_cleanups.is_empty());
+        assert!(!inner_handlers.is_empty());
+        assert!(!tail_cleanups.is_empty());
+        assert!(nested_cleanups.iter().any(|cleanup| {
+            inner_handlers
+                .iter()
+                .any(|handler| can_reach(cfg, *cleanup, *handler))
+        }));
+        assert!(inner_handlers.iter().any(|handler| {
+            tail_cleanups
+                .iter()
+                .any(|tail| can_reach(cfg, *handler, *tail))
+        }));
+    };
+
+    let normal_cfg = cfg_for(&cfgs, "NormalCaught");
+    assert_local_catch(normal_cfg);
+    let normal_work = blocks_with_stmt(normal_cfg, &source, "statement", "Work");
+    let after_normal = block_with_stmt(normal_cfg, &source, "statement", "AfterNormal");
+    assert!(normal_work
+        .iter()
+        .any(|work| can_reach(normal_cfg, *work, after_normal)));
+
+    let exit_cfg = cfg_for(&cfgs, "ExitCaught");
+    assert_local_catch(exit_cfg);
+    let exit_stmts = exit_cfg
+        .graph
+        .node_indices()
+        .filter_map(|index| {
+            let block = &exit_cfg.graph[index];
+            block
+                .stmts
+                .iter()
+                .any(|stmt| {
+                    stmt.node_kind == "statement"
+                        && std::str::from_utf8(&source[stmt.byte_range.clone()])
+                            .is_ok_and(|text| text.trim() == "Exit;")
+                })
+                .then(|| BlockId::from(index))
+        })
+        .collect::<Vec<_>>();
+    let after_exit = block_with_stmt(exit_cfg, &source, "statement", "AfterExit");
+    assert!(!exit_stmts.is_empty());
+    for exit_stmt in exit_stmts {
+        assert!(!can_reach(exit_cfg, exit_stmt, after_exit));
+        assert!(can_reach(exit_cfg, exit_stmt, exit_cfg.exit));
+    }
+
+    let break_cfg = cfg_for(&cfgs, "BreakCaught");
+    assert_local_catch(break_cfg);
+    let break_condition = block_with_stmt(break_cfg, &source, "while", "while LoopCondition");
+    let break_after = successors(break_cfg, break_condition)
+        .into_iter()
+        .find_map(|(target, kind)| (kind == EdgeKind::LoopExit).then_some(target))
+        .expect("break loop must have an exit target");
+    let break_tails = blocks_with_stmt(break_cfg, &source, "statement", "TailCleanup");
+    assert!(break_tails.iter().any(|tail| {
+        successors(break_cfg, *tail).contains(&(break_after, EdgeKind::FinallyExit))
+    }));
+
+    let continue_cfg = cfg_for(&cfgs, "ContinueCaught");
+    assert_local_catch(continue_cfg);
+    let continue_condition = block_with_stmt(continue_cfg, &source, "while", "while LoopCondition");
+    let continue_tails = blocks_with_stmt(continue_cfg, &source, "statement", "TailCleanup");
+    assert!(continue_tails.iter().any(|tail| {
+        successors(continue_cfg, *tail).contains(&(continue_condition, EdgeKind::FinallyExit))
+    }));
+}
+
+#[test]
 fn mixed_normal_and_exit_paths_do_not_cross_shared_finalizers() {
     let source = br#"
 unit MixedFinalizerPaths;

@@ -204,7 +204,8 @@ fn build_scope_cfg(
         next_label_binding: 1,
         label_binding_parents: vec![None],
         finalizer_cache: HashMap::new(),
-        active_finalizer_continuation: None,
+        next_exception_dispatch_id: 0,
+        exception_dispatch_stack: Vec::new(),
         implicit_exception_depth: 0,
         block_has_stmt: HashSet::new(),
         label_scopes,
@@ -380,8 +381,10 @@ struct BuildContext<'a> {
     /// pending continuation. A cached body is safe to reuse only when its
     /// normal completion preserves the same continuation.
     finalizer_cache: HashMap<FinalizerCacheKey, CachedFinalizerBody>,
-    /// Pending continuation inherited while constructing a finalizer body.
-    active_finalizer_continuation: Option<ContinuationKey>,
+    /// Fresh identities for concrete try/except handler dispatch contexts.
+    next_exception_dispatch_id: usize,
+    /// The active handler contexts that can receive unknown exceptions.
+    exception_dispatch_stack: Vec<ExceptionDispatchId>,
     /// Nonzero while walking a try body, handler, or finally body.  This is
     /// intentionally independent from `cleanup_scopes`: handlers/finalizers
     /// may throw outward even though the scope whose handler they belong to
@@ -1128,9 +1131,15 @@ struct FinalizerCacheKey {
     continuation: ContinuationKey,
     cleanup_scopes: Vec<ScopeId>,
     loop_context: Vec<(BlockId, BlockId, Vec<ScopeId>, Vec<ScopeId>)>,
+    /// Concrete handler-dispatch instances; depth alone can alias different
+    /// handler blocks when a finalizer is cloned.
+    exception_dispatch_context: Vec<ExceptionDispatchId>,
     implicit_exception_depth: usize,
     label_binding: Option<LabelBindingId>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExceptionDispatchId(usize);
 
 #[derive(Debug, Clone)]
 struct CachedFinalizerBody {
@@ -1175,7 +1184,7 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
         }
 
         let key = match &input {
-            FinalizerInput::Normal(_) => ctx.active_finalizer_continuation.clone(),
+            FinalizerInput::Normal(_) => None,
             FinalizerInput::Transfer(transfer) => Some(ContinuationKey::from_transfer(transfer)),
         };
         if let Some(group) = groups
@@ -1266,6 +1275,7 @@ fn walk_or_reuse_finally_body(
                 )
             })
             .collect(),
+        exception_dispatch_context: ctx.exception_dispatch_stack.clone(),
         implicit_exception_depth: ctx.implicit_exception_depth,
         label_binding: finally_body_contains_goto(node).then_some(ctx.current_label_binding),
     });
@@ -1283,10 +1293,7 @@ fn walk_or_reuse_finally_body(
     ctx.next_label_binding += 1;
     ctx.label_binding_parents.push(Some(previous_label_binding));
     ctx.current_label_binding = label_binding;
-    let previous_continuation = ctx.active_finalizer_continuation.clone();
-    ctx.active_finalizer_continuation = continuation.cloned();
     let finally_flow = walk_finally_body(ctx, node, finally_block);
-    ctx.active_finalizer_continuation = previous_continuation;
     ctx.current_label_binding = previous_label_binding;
     ctx.implicit_exception_depth -= 1;
 
@@ -1325,9 +1332,13 @@ fn node_contains_goto(node: Node) -> bool {
 /// no semantic exception hierarchy. A missing catch-all retains an unmatched
 /// exception transfer so an enclosing handler can receive it.
 fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let dispatch_id = ExceptionDispatchId(ctx.next_exception_dispatch_id);
+    ctx.next_exception_dispatch_id += 1;
+    ctx.exception_dispatch_stack.push(dispatch_id);
     ctx.implicit_exception_depth += 1;
     let try_flow = walk_try_body(ctx, node, current);
     ctx.implicit_exception_depth -= 1;
+    debug_assert_eq!(ctx.exception_dispatch_stack.pop(), Some(dispatch_id));
 
     let mut output = Flow::default();
     let mut normal_ends = Vec::new();

@@ -47,6 +47,24 @@ fn blocks_with_stmt(cfg: &Cfg, source: &[u8], kind: &str, text: &str) -> Vec<Blo
         .collect()
 }
 
+fn blocks_with_exact_stmt(cfg: &Cfg, source: &[u8], kind: &str, expected: &str) -> Vec<BlockId> {
+    cfg.graph
+        .node_indices()
+        .filter_map(|index| {
+            let block = &cfg.graph[index];
+            block
+                .stmts
+                .iter()
+                .any(|stmt| {
+                    stmt.node_kind == kind
+                        && std::str::from_utf8(&source[stmt.byte_range.clone()])
+                            .is_ok_and(|text| text.trim() == expected)
+                })
+                .then(|| BlockId::from(index))
+        })
+        .collect()
+}
+
 fn blocks_containing_text(cfg: &Cfg, source: &[u8], text: &str) -> Vec<BlockId> {
     cfg.graph
         .node_indices()
@@ -98,6 +116,37 @@ fn can_reach(cfg: &Cfg, from: BlockId, to: BlockId) -> bool {
         if visited.insert(block) {
             pending.extend(cfg.graph.neighbors(block.index()).map(BlockId::from));
         }
+    }
+
+    false
+}
+
+fn can_reach_non_exception(cfg: &Cfg, from: BlockId, to: BlockId) -> bool {
+    can_reach_non_exception_avoiding(cfg, from, to, &[])
+}
+
+fn can_reach_non_exception_avoiding(
+    cfg: &Cfg,
+    from: BlockId,
+    to: BlockId,
+    forbidden: &[BlockId],
+) -> bool {
+    let mut pending = vec![from];
+    let mut visited = HashSet::new();
+
+    while let Some(block) = pending.pop() {
+        if forbidden.contains(&block) || !visited.insert(block) {
+            continue;
+        }
+        if block == to {
+            return true;
+        }
+
+        pending.extend(cfg.graph.edge_indices().filter_map(|edge| {
+            let (source, target) = cfg.graph.edge_endpoints(edge)?;
+            (source == block.index() && cfg.graph[edge] != EdgeKind::ExceptionThrow)
+                .then(|| BlockId::from(target))
+        }));
     }
 
     false
@@ -596,6 +645,210 @@ end.\n"
     assert!(
         cfg.graph.edge_count() < 10_000,
         "nested try bodies in finalizers should keep edge growth bounded, got {} edges",
+        cfg.graph.edge_count()
+    );
+}
+
+#[test]
+fn normal_and_exit_cleanup_continuations_do_not_cross() {
+    let source = br#"
+unit CleanupContinuationIdentity;
+interface
+implementation
+
+procedure CleanupContinuationIdentity;
+begin
+  try
+    if Leave then
+      Exit;
+    Work;
+  finally
+    try
+      InnerWork;
+    finally
+      InnerCleanup;
+    end;
+    TailCleanup;
+  end;
+  AfterTry;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "CleanupContinuationIdentity");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit;");
+    let work_blocks = blocks_with_exact_stmt(cfg, &source, "statement", "Work;");
+    let inner_cleanups = blocks_with_stmt(cfg, &source, "statement", "InnerCleanup");
+    let tail_cleanups = blocks_with_stmt(cfg, &source, "statement", "TailCleanup");
+    let after_try = block_with_stmt(cfg, &source, "statement", "AfterTry;");
+
+    assert!(!work_blocks.is_empty());
+    assert!(!inner_cleanups.is_empty());
+    assert!(tail_cleanups.len() >= 2);
+
+    let normal_inner_cleanups: Vec<_> = inner_cleanups
+        .iter()
+        .copied()
+        .filter(|cleanup| can_reach_non_exception(cfg, *cleanup, after_try))
+        .collect();
+    let exit_inner_cleanups: Vec<_> = inner_cleanups
+        .iter()
+        .copied()
+        .filter(|cleanup| can_reach_non_exception_avoiding(cfg, *cleanup, cfg.exit, &[after_try]))
+        .collect();
+    assert_eq!(normal_inner_cleanups.len(), 1);
+    assert_eq!(exit_inner_cleanups.len(), 1);
+    assert_ne!(normal_inner_cleanups[0], exit_inner_cleanups[0]);
+
+    let normal_tail_cleanups: Vec<_> = tail_cleanups
+        .iter()
+        .copied()
+        .filter(|tail| can_reach_non_exception(cfg, *tail, after_try))
+        .collect();
+    let exit_tail_cleanups: Vec<_> = tail_cleanups
+        .iter()
+        .copied()
+        .filter(|tail| can_reach_non_exception_avoiding(cfg, *tail, cfg.exit, &[after_try]))
+        .collect();
+    assert_eq!(normal_tail_cleanups.len(), 1);
+    assert_eq!(exit_tail_cleanups.len(), 1);
+    assert_ne!(normal_tail_cleanups[0], exit_tail_cleanups[0]);
+
+    let normal_inner = normal_inner_cleanups[0];
+    let exit_inner = exit_inner_cleanups[0];
+    let normal_tail = normal_tail_cleanups[0];
+    let exit_tail = exit_tail_cleanups[0];
+
+    assert!(work_blocks
+        .iter()
+        .any(|work| can_reach_non_exception(cfg, *work, normal_inner)));
+    assert!(can_reach_non_exception(cfg, normal_inner, normal_tail));
+    assert!(can_reach_non_exception(cfg, normal_tail, after_try));
+    assert!(can_reach_non_exception(cfg, exit_stmt, exit_inner));
+    assert!(can_reach_non_exception(cfg, exit_inner, exit_tail));
+    assert!(can_reach_non_exception(cfg, exit_tail, cfg.exit));
+
+    assert!(
+        !can_reach_non_exception(cfg, exit_stmt, after_try),
+        "Exit must not reach the normal continuation without an exception"
+    );
+    assert!(
+        work_blocks
+            .iter()
+            .all(|work| { !can_reach_non_exception_avoiding(cfg, *work, cfg.exit, &[after_try]) }),
+        "normal completion must not reach the Exit continuation"
+    );
+    assert!(work_blocks
+        .iter()
+        .all(|work| !can_reach_non_exception(cfg, *work, exit_inner)));
+    assert!(!can_reach_non_exception(cfg, exit_stmt, normal_inner));
+    assert!(!successors(cfg, normal_inner).contains(&(exit_tail, EdgeKind::FinallyExit)));
+    assert!(!successors(cfg, exit_inner).contains(&(normal_tail, EdgeKind::FinallyExit)));
+}
+
+#[test]
+fn nested_normal_and_exit_cleanup_suffixes_do_not_cross() {
+    let source = br#"
+unit NestedCleanupContinuationIdentity;
+interface
+implementation
+
+procedure NestedCleanupContinuationIdentity;
+begin
+  try
+    if Leave then
+      Exit;
+    Work;
+  finally
+    try
+      InnerWork;
+    finally
+      try
+        DeepWork;
+      finally
+        DeepCleanup;
+      end;
+      InnerTail;
+    end;
+    TailCleanup;
+  end;
+  AfterTry;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "NestedCleanupContinuationIdentity");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit;");
+    let work_blocks = blocks_with_exact_stmt(cfg, &source, "statement", "Work;");
+    let deep_cleanups = blocks_with_stmt(cfg, &source, "statement", "DeepCleanup");
+    let after_try = block_with_stmt(cfg, &source, "statement", "AfterTry;");
+
+    assert!(!work_blocks.is_empty());
+
+    let normal_deep_cleanups: Vec<_> = deep_cleanups
+        .iter()
+        .copied()
+        .filter(|cleanup| can_reach_non_exception(cfg, *cleanup, after_try))
+        .collect();
+    let exit_deep_cleanups: Vec<_> = deep_cleanups
+        .iter()
+        .copied()
+        .filter(|cleanup| can_reach_non_exception_avoiding(cfg, *cleanup, cfg.exit, &[after_try]))
+        .collect();
+
+    assert_eq!(normal_deep_cleanups.len(), 1);
+    assert_eq!(exit_deep_cleanups.len(), 1);
+    assert_ne!(normal_deep_cleanups[0], exit_deep_cleanups[0]);
+    assert!(work_blocks
+        .iter()
+        .any(|work| { can_reach_non_exception(cfg, *work, normal_deep_cleanups[0]) }));
+    assert!(can_reach_non_exception(
+        cfg,
+        exit_stmt,
+        exit_deep_cleanups[0]
+    ));
+    assert!(!can_reach_non_exception(cfg, exit_stmt, after_try));
+    assert!(work_blocks
+        .iter()
+        .all(|work| { !can_reach_non_exception_avoiding(cfg, *work, cfg.exit, &[after_try]) }));
+}
+
+#[test]
+fn nested_finalizers_with_local_catches_have_bounded_release_cfg() {
+    const DEPTH: usize = 12;
+    let mut body = String::from("LeafCleanup;");
+    for index in (0..DEPTH).rev() {
+        body = format!(
+            "try Work{index}; finally try CatchWork{index}; except Handler{index}; end; {body} end;"
+        );
+    }
+    let source = format!(
+        "unit ReleaseDispatchBalance;\n\
+interface\n\
+implementation\n\
+procedure ReleaseDispatchBalance;\n\
+begin {body} end;\n\
+end.\n"
+    );
+
+    let tree = parse_clean(source.as_bytes());
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "ReleaseDispatchBalance");
+
+    assert!(
+        cfg.graph.node_count() < 1_000,
+        "local handler dispatch state must not make cleanup construction exponential, got {} blocks",
+        cfg.graph.node_count()
+    );
+    assert!(
+        cfg.graph.edge_count() < 10_000,
+        "local handler dispatch state must not make cleanup edges exponential, got {} edges",
         cfg.graph.edge_count()
     );
 }

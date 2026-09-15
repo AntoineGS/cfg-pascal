@@ -204,6 +204,10 @@ fn build_scope_cfg(
         next_label_binding: 1,
         label_binding_parents: vec![None],
         finalizer_cache: HashMap::new(),
+        finalizer_continuation_ids: HashMap::new(),
+        next_finalizer_continuation_id: 0,
+        active_finalizer_continuation: None,
+        active_finalizer_suspended_transfer: None,
         next_exception_dispatch_id: 0,
         exception_dispatch_stack: Vec::new(),
         implicit_exception_depth: 0,
@@ -381,6 +385,21 @@ struct BuildContext<'a> {
     /// pending continuation. A cached body is safe to reuse only when its
     /// normal completion preserves the same continuation.
     finalizer_cache: HashMap<FinalizerCacheKey, CachedFinalizerBody>,
+    /// Interned semantic identities for finalizer return continuations. The
+    /// identity is stable across cache hits and intentionally excludes the
+    /// concrete handler-dispatch stack, which is an execution context rather
+    /// than part of a normal return suffix.
+    finalizer_continuation_ids: HashMap<FinalizerContinuationKey, FinalizerContinuationId>,
+    next_finalizer_continuation_id: usize,
+    /// The semantic identity of the finalizer body currently being walked.
+    /// Nested normal completions must retain this caller continuation instead
+    /// of being merged solely because they have no pending transfer.
+    active_finalizer_continuation: Option<FinalizerContinuationId>,
+    /// The transfer suspended beyond the current finalizer's local suffix.
+    /// This is used only to identify equivalent return continuations; it must
+    /// never become a nested finalizer input, or its local tail would be
+    /// skipped.
+    active_finalizer_suspended_transfer: Option<ContinuationKey>,
     /// Fresh identities for concrete try/except handler dispatch contexts.
     next_exception_dispatch_id: usize,
     /// The active handler contexts that can receive unknown exceptions.
@@ -1129,6 +1148,10 @@ struct FinalizerCacheKey {
     end_byte: usize,
     scope_id: ScopeId,
     continuation: Option<ContinuationKey>,
+    /// The enclosing finalizer walk supplies the remaining local suffix and
+    /// any suspended transfer. Different caller continuations therefore
+    /// cannot share an open normal-completion endpoint.
+    caller_continuation: Option<FinalizerContinuationId>,
     cleanup_scopes: Vec<ScopeId>,
     loop_context: Vec<(BlockId, BlockId, Vec<ScopeId>, Vec<ScopeId>)>,
     /// Concrete handler-dispatch instances; depth alone can alias different
@@ -1137,6 +1160,25 @@ struct FinalizerCacheKey {
     implicit_exception_depth: usize,
     label_binding: Option<LabelBindingId>,
 }
+
+/// Semantic identity of a finalizer's normal return continuation.
+///
+/// The syntactic finalizer identifies the remaining local suffix, while the
+/// suspended transfer and enclosing continuation preserve the complete
+/// continuation chain. Handler-dispatch identities are deliberately absent:
+/// they are retained by [`FinalizerCacheKey`] for exceptional edges, but must
+/// not prevent equivalent normal suffixes from sharing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FinalizerContinuationKey {
+    start_byte: usize,
+    end_byte: usize,
+    scope_id: ScopeId,
+    suspended_transfer: Option<ContinuationKey>,
+    caller: Option<FinalizerContinuationId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FinalizerContinuationId(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ExceptionDispatchId(usize);
@@ -1269,6 +1311,7 @@ fn walk_or_reuse_finally_body(
         end_byte: node.end_byte(),
         scope_id,
         continuation: continuation.cloned(),
+        caller_continuation: ctx.active_finalizer_continuation,
         cleanup_scopes: ctx.cleanup_scopes.clone(),
         loop_context: ctx
             .loop_stack
@@ -1287,6 +1330,31 @@ fn walk_or_reuse_finally_body(
         label_binding: finally_body_contains_goto(node).then_some(ctx.current_label_binding),
     };
 
+    // A normal nested finalizer completion resumes the enclosing finalizer's
+    // local suffix before any suspended transfer is routed. In the cache key,
+    // however, that suspended transfer is part of the continuation identity;
+    // carrying it here is metadata only and does not alter Flow construction.
+    let suspended_transfer = continuation
+        .cloned()
+        .or_else(|| ctx.active_finalizer_suspended_transfer.clone());
+    let continuation_key = FinalizerContinuationKey {
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+        scope_id,
+        suspended_transfer: suspended_transfer.clone(),
+        caller: ctx.active_finalizer_continuation,
+    };
+    let continuation_id =
+        if let Some(continuation_id) = ctx.finalizer_continuation_ids.get(&continuation_key) {
+            *continuation_id
+        } else {
+            let continuation_id = FinalizerContinuationId(ctx.next_finalizer_continuation_id);
+            ctx.next_finalizer_continuation_id += 1;
+            ctx.finalizer_continuation_ids
+                .insert(continuation_key, continuation_id);
+            continuation_id
+        };
+
     if let Some(cached) = ctx.finalizer_cache.get(&cache_key).cloned() {
         return (cached.entry, cached.flow);
     }
@@ -1298,7 +1366,13 @@ fn walk_or_reuse_finally_body(
     ctx.next_label_binding += 1;
     ctx.label_binding_parents.push(Some(previous_label_binding));
     ctx.current_label_binding = label_binding;
+    let previous_finalizer_continuation = ctx.active_finalizer_continuation;
+    let previous_suspended_transfer = ctx.active_finalizer_suspended_transfer.clone();
+    ctx.active_finalizer_continuation = Some(continuation_id);
+    ctx.active_finalizer_suspended_transfer = suspended_transfer;
     let finally_flow = walk_finally_body(ctx, node, finally_block);
+    ctx.active_finalizer_continuation = previous_finalizer_continuation;
+    ctx.active_finalizer_suspended_transfer = previous_suspended_transfer;
     ctx.current_label_binding = previous_label_binding;
     ctx.implicit_exception_depth -= 1;
 
@@ -1341,7 +1415,8 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
     ctx.implicit_exception_depth += 1;
     let try_flow = walk_try_body(ctx, node, current);
     ctx.implicit_exception_depth -= 1;
-    debug_assert_eq!(ctx.exception_dispatch_stack.pop(), Some(dispatch_id));
+    let popped_dispatch_id = ctx.exception_dispatch_stack.pop();
+    debug_assert_eq!(popped_dispatch_id, Some(dispatch_id));
 
     let mut output = Flow::default();
     let mut normal_ends = Vec::new();

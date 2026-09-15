@@ -185,3 +185,107 @@ end.
     assert!(can_reach(cfg, range_arm, after_case));
     assert!(can_reach(cfg, else_arm, after_case));
 }
+
+#[test]
+fn foreach_has_a_back_edge_exit_and_nested_loop_controls() {
+    let source = br#"
+unit ForEachFlow;
+interface
+implementation
+
+procedure ForEachControls;
+begin
+  for Item in Items do
+  begin
+    if Item = 1 then
+      Continue;
+    if Item = 2 then
+      Break;
+    Body(Item);
+  end;
+  AfterEach;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ForEachControls");
+
+    let header = block_with_stmt(cfg, &source, "foreach", "for Item in Items");
+    let body = block_with_stmt(cfg, &source, "statement", "Body(Item)");
+    let continue_stmt = block_with_stmt(cfg, &source, "statement", "Continue");
+    let break_stmt = block_with_stmt(cfg, &source, "statement", "Break");
+    let after_each = block_with_stmt(cfg, &source, "statement", "AfterEach");
+
+    let header_successors = successors(cfg, header);
+    let body_entry = header_successors
+        .iter()
+        .find_map(|(target, kind)| (*kind == EdgeKind::ConditionalTrue).then_some(*target))
+        .expect("foreach header must enter its body");
+    let loop_exit = header_successors
+        .iter()
+        .find_map(|(target, kind)| (*kind == EdgeKind::LoopExit).then_some(*target))
+        .expect("foreach header must have a loop-exit edge");
+    assert!(can_reach(cfg, body_entry, body));
+    assert!(can_reach(cfg, body, header));
+    assert!(can_reach(cfg, loop_exit, after_each));
+    assert_eq!(
+        successors(cfg, continue_stmt),
+        vec![(header, EdgeKind::Normal)],
+        "Continue inside a foreach must restart the foreach"
+    );
+    assert_eq!(
+        successors(cfg, break_stmt),
+        vec![(loop_exit, EdgeKind::Normal)],
+        "Break inside a foreach must leave the foreach"
+    );
+
+    let header_ref = cfg.graph[header.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "foreach")
+        .expect("foreach header reference");
+    let header_text = std::str::from_utf8(&source[header_ref.byte_range.clone()]).unwrap();
+    assert!(!header_text.contains("Body(Item)"));
+}
+
+#[test]
+fn foreach_header_and_body_exceptions_reach_an_enclosing_handler() {
+    let source = br#"
+unit ProtectedForEach;
+interface
+implementation
+
+procedure ProtectedForEach;
+begin
+  try
+    for Item in ItemsCall() do
+      BodyCall(Item);
+  except
+    HandleEach;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ProtectedForEach");
+
+    let header = block_with_stmt(cfg, &source, "foreach", "for Item in ItemsCall()");
+    let body = block_with_stmt(cfg, &source, "statement", "BodyCall(Item)");
+    let handler = block_with_stmt(cfg, &source, "statement", "HandleEach");
+    assert!(successors(cfg, header).contains(&(handler, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, body).contains(&(handler, EdgeKind::ExceptionThrow)));
+
+    let header_ref = cfg.graph[header.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "foreach")
+        .expect("foreach header reference");
+    let header_text = std::str::from_utf8(&source[header_ref.byte_range.clone()]).unwrap();
+    assert!(!header_text.contains("BodyCall"));
+}

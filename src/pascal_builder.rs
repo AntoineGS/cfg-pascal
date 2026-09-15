@@ -560,7 +560,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "statements" => walk_statements_node(ctx, child, current),
         "ifElse" => handle_if_else(ctx, child, current),
         "if" => handle_if_only(ctx, child, current),
-        "for" | "while" => handle_for_or_while(ctx, child, current),
+        "for" | "foreach" | "while" => handle_for_or_while(ctx, child, current),
         "case" => handle_case(ctx, child, current),
         "repeat" => handle_repeat(ctx, child, current),
         "try" => handle_try(ctx, child, current),
@@ -988,6 +988,7 @@ fn add_loop_header_stmt(ctx: &mut BuildContext<'_>, block: BlockId, node: Node) 
     let end = match node.kind() {
         "while" => node.child_by_field_name("condition"),
         "for" => node.child_by_field_name("end"),
+        "foreach" => node.child_by_field_name("iterable"),
         _ => None,
     };
     if let Some(end) = end {

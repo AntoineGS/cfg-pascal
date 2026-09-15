@@ -138,7 +138,7 @@ pub(crate) type LabelBindingId = usize;
 ///
 /// `Goto` carries a label target and the target scope set, allowing cleanup
 /// routing to distinguish an in-scope jump from one that leaves a finalizer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TransferKind {
     Exit,
     Break,
@@ -360,7 +360,7 @@ pub(crate) struct LoopFrame {
 /// while a `finally` body is being built. Keeping abrupt paths alongside the
 /// normal continuation makes those paths explicit without changing cfg-core's
 /// public graph types.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Flow {
     pub normal: Option<BlockId>,
     pub transfers: Vec<PendingTransfer>,

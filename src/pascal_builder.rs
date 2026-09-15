@@ -203,6 +203,8 @@ fn build_scope_cfg(
         current_label_binding: 0,
         next_label_binding: 1,
         label_binding_parents: vec![None],
+        finalizer_cache: HashMap::new(),
+        active_finalizer_continuation: None,
         implicit_exception_depth: 0,
         block_has_stmt: HashSet::new(),
         label_scopes,
@@ -374,6 +376,12 @@ struct BuildContext<'a> {
     next_label_binding: LabelBindingId,
     /// Enclosing label namespace for each walk, starting at the routine body.
     label_binding_parents: Vec<Option<LabelBindingId>>,
+    /// Finalizer bodies keyed by their stable syntactic scope and effective
+    /// pending continuation. A cached body is safe to reuse only when its
+    /// normal completion preserves the same continuation.
+    finalizer_cache: HashMap<FinalizerCacheKey, CachedFinalizerBody>,
+    /// Pending continuation inherited while constructing a finalizer body.
+    active_finalizer_continuation: Option<ContinuationKey>,
     /// Nonzero while walking a try body, handler, or finally body.  This is
     /// intentionally independent from `cleanup_scopes`: handlers/finalizers
     /// may throw outward even though the scope whose handler they belong to
@@ -1034,12 +1042,11 @@ enum FinalizerInput {
     Transfer(PendingTransfer),
 }
 
-/// Semantic identity of a continuation entering a finalizer. The source block
-/// is deliberately absent: equivalent continuations can share one cleanup
-/// body without introducing cross-path edges.
-#[derive(Debug, PartialEq, Eq)]
-enum FinalizerKey {
-    Normal,
+/// Semantic identity of a pending continuation after a finalizer completes.
+/// The source block is deliberately absent: equivalent continuations can
+/// share one cleanup body without introducing cross-path edges.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ContinuationKey {
     Transfer {
         kind: TransferKind,
         target: Option<BlockId>,
@@ -1050,23 +1057,42 @@ enum FinalizerKey {
     },
 }
 
-impl FinalizerKey {
-    fn from_input(input: &FinalizerInput) -> Self {
-        match input {
-            FinalizerInput::Normal(_) => Self::Normal,
-            FinalizerInput::Transfer(transfer) => Self::Transfer {
-                kind: transfer.kind,
-                target: transfer.target,
-                target_label: transfer
-                    .target_label
-                    .as_ref()
-                    .map(|label| label.to_ascii_lowercase()),
-                target_label_binding: transfer.target_label_binding,
-                target_scopes: transfer.target_scopes.clone(),
-                exception_type: transfer
-                    .exception_type
-                    .as_ref()
-                    .map(|exception_type| exception_type.to_ascii_lowercase()),
+impl ContinuationKey {
+    fn from_transfer(transfer: &PendingTransfer) -> Self {
+        Self::Transfer {
+            kind: transfer.kind,
+            target: transfer.target,
+            target_label: transfer
+                .target_label
+                .as_ref()
+                .map(|label| label.to_ascii_lowercase()),
+            target_label_binding: transfer.target_label_binding,
+            target_scopes: transfer.target_scopes.clone(),
+            exception_type: transfer
+                .exception_type
+                .as_ref()
+                .map(|exception_type| exception_type.to_ascii_lowercase()),
+        }
+    }
+
+    fn transfer_from_source(&self, source: BlockId) -> PendingTransfer {
+        match self {
+            Self::Transfer {
+                kind,
+                target,
+                target_label,
+                target_label_binding,
+                target_scopes,
+                exception_type,
+            } => PendingTransfer {
+                source,
+                kind: *kind,
+                target: *target,
+                target_label: target_label.clone(),
+                target_label_binding: *target_label_binding,
+                target_scopes: target_scopes.clone(),
+                from_finally: true,
+                exception_type: exception_type.clone(),
             },
         }
     }
@@ -1074,22 +1100,44 @@ impl FinalizerKey {
 
 #[derive(Debug)]
 struct FinalizerGroup {
-    key: FinalizerKey,
+    /// `None` is a normal completion with a caller-local continuation. A
+    /// `Some` key is a pending transfer that remains semantically identical
+    /// after this finalizer completes.
+    key: Option<ContinuationKey>,
     inputs: Vec<FinalizerInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FinalizerCacheKey {
+    start_byte: usize,
+    end_byte: usize,
+    scope_id: ScopeId,
+    continuation: ContinuationKey,
+    cleanup_scopes: Vec<ScopeId>,
+    loop_context: Vec<(BlockId, BlockId, Vec<ScopeId>, Vec<ScopeId>)>,
+    implicit_exception_depth: usize,
+    label_binding: Option<LabelBindingId>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedFinalizerBody {
+    entry: BlockId,
+    flow: Flow,
 }
 
 /// Handle a `try..finally` block.
 ///
-/// Incoming continuations share a finalizer body only when their semantic
+/// Incoming continuations share a finalizer body only when their effective
 /// pending transfer is equivalent. Distinct normal, return, loop-target, and
-/// exception continuations retain separate cleanup paths.
+/// exception continuations retain separate cleanup paths. Bodies whose normal
+/// completion preserves a pending transfer are memoized across construction
+/// instances; normal completion without such a transfer remains caller-local.
 fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
     let scope_id = ctx
         .scope_ids
         .get(&(node.start_byte(), node.end_byte()))
         .copied()
         .expect("try/finally scope missing from prepass");
-    let after_block = new_block(ctx, BasicBlockKind::Normal);
 
     ctx.cleanup_scopes.push(scope_id);
     ctx.implicit_exception_depth += 1;
@@ -1113,7 +1161,12 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
             }
         }
 
-        let key = FinalizerKey::from_input(&input);
+        let key = match &input {
+            FinalizerInput::Normal(_) => ctx.active_finalizer_continuation.clone(),
+            FinalizerInput::Transfer(transfer) => {
+                Some(ContinuationKey::from_transfer(transfer))
+            }
+        };
         if let Some(group) = groups
             .iter_mut()
             .find(|group: &&mut FinalizerGroup| group.key == key)
@@ -1128,8 +1181,13 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
     }
 
     for group in groups {
-        let is_normal = matches!(group.key, FinalizerKey::Normal);
-        let finally_block = new_block(ctx, BasicBlockKind::FinallyHandler);
+        let is_normal = group.key.is_none();
+        let (finally_block, finally_flow) = walk_or_reuse_finally_body(
+            ctx,
+            node,
+            scope_id,
+            group.key.as_ref(),
+        );
         for input in &group.inputs {
             let (source, entry_edge) = match input {
                 FinalizerInput::Normal(source) => (*source, EdgeKind::FinallyEntry),
@@ -1145,18 +1203,9 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
             ctx.builder.add_edge(source, finally_block, entry_edge);
         }
 
-        ctx.implicit_exception_depth += 1;
-        let previous_label_binding = ctx.current_label_binding;
-        let label_binding = ctx.next_label_binding;
-        ctx.next_label_binding += 1;
-        ctx.label_binding_parents.push(Some(previous_label_binding));
-        ctx.current_label_binding = label_binding;
-        let finally_flow = walk_finally_body(ctx, node, finally_block);
-        ctx.current_label_binding = previous_label_binding;
-        ctx.implicit_exception_depth -= 1;
-
         if let Some(finally_end) = finally_flow.normal {
             if is_normal {
+                let after_block = new_block(ctx, BasicBlockKind::Normal);
                 ctx.builder
                     .add_edge(finally_end, after_block, EdgeKind::FinallyExit);
                 output.normal = Some(after_block);
@@ -1167,6 +1216,10 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
                 // The finalizer completed normally, so the original transfer
                 // remains pending for outer cleanup scopes.
                 output.transfers.push(transfer.with_source(finally_end));
+            } else if let Some(key) = group.key.as_ref() {
+                output
+                    .transfers
+                    .push(key.transfer_from_source(finally_end));
             }
         }
 
@@ -1182,6 +1235,84 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
     }
 
     output
+}
+
+fn walk_or_reuse_finally_body(
+    ctx: &mut BuildContext<'_>,
+    node: Node,
+    scope_id: ScopeId,
+    continuation: Option<&ContinuationKey>,
+) -> (BlockId, Flow) {
+    let cache_key = continuation.map(|continuation| FinalizerCacheKey {
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+        scope_id,
+        continuation: continuation.clone(),
+        cleanup_scopes: ctx.cleanup_scopes.clone(),
+        loop_context: ctx
+            .loop_stack
+            .iter()
+            .map(|frame| {
+                (
+                    frame.continue_target,
+                    frame.break_target,
+                    frame.continue_scopes.clone(),
+                    frame.break_scopes.clone(),
+                )
+            })
+            .collect(),
+        implicit_exception_depth: ctx.implicit_exception_depth,
+        label_binding: finally_body_contains_goto(node)
+            .then_some(ctx.current_label_binding),
+    });
+
+    if let Some(cache_key) = &cache_key {
+        if let Some(cached) = ctx.finalizer_cache.get(cache_key).cloned() {
+            return (cached.entry, cached.flow);
+        }
+    }
+
+    let finally_block = new_block(ctx, BasicBlockKind::FinallyHandler);
+    ctx.implicit_exception_depth += 1;
+    let previous_label_binding = ctx.current_label_binding;
+    let label_binding = ctx.next_label_binding;
+    ctx.next_label_binding += 1;
+    ctx.label_binding_parents.push(Some(previous_label_binding));
+    ctx.current_label_binding = label_binding;
+    let previous_continuation = ctx.active_finalizer_continuation.clone();
+    ctx.active_finalizer_continuation = continuation.cloned();
+    let finally_flow = walk_finally_body(ctx, node, finally_block);
+    ctx.active_finalizer_continuation = previous_continuation;
+    ctx.current_label_binding = previous_label_binding;
+    ctx.implicit_exception_depth -= 1;
+
+    if let Some(cache_key) = cache_key {
+        ctx.finalizer_cache.insert(
+            cache_key,
+            CachedFinalizerBody {
+                entry: finally_block,
+                flow: finally_flow.clone(),
+            },
+        );
+    }
+
+    (finally_block, finally_flow)
+}
+
+fn finally_body_contains_goto(node: Node) -> bool {
+    field_children(node, "finally")
+        .into_iter()
+        .any(node_contains_goto)
+}
+
+fn node_contains_goto(node: Node) -> bool {
+    if node.kind() == "goto" {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    let result = node.named_children(&mut cursor).any(node_contains_goto);
+    result
 }
 
 /// Handle a `try..except` block.

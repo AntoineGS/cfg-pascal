@@ -567,6 +567,33 @@ fn deeply_nested_finalizers_have_bounded_cfg_size() {
 }
 
 #[test]
+fn nested_try_bodies_inside_finalizers_have_bounded_cfg_size() {
+    const DEPTH: usize = 12;
+    let mut body = String::from("Cleanup;");
+    for _ in 0..DEPTH {
+        body = format!("try Work; finally {body} end;");
+    }
+    let source = format!(
+        "unit NestedCleanupBodies;\n\
+interface\n\
+implementation\n\
+procedure NestedCleanupBodies;\n\
+begin {body} end;\n\
+end.\n"
+    );
+
+    let tree = parse_clean(source.as_bytes());
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "NestedCleanupBodies");
+
+    assert!(
+        cfg.graph.node_count() < 1_000,
+        "nested try bodies in finalizers should share cleanup subgraphs, got {} blocks",
+        cfg.graph.node_count()
+    );
+}
+
+#[test]
 fn mixed_normal_and_exit_paths_do_not_cross_shared_finalizers() {
     let source = br#"
 unit MixedFinalizerPaths;

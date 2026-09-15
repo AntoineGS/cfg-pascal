@@ -287,6 +287,8 @@ impl ExceptionTypeIndex {
 
         match node.kind() {
             "defProc" => self.collect_routine(node, scope, source, conditional),
+            "lambda" => self.collect_lambda(node, scope, source, conditional),
+            "for" | "foreach" => self.collect_loop(node, scope, source, conditional),
             "declTypes" => self.collect_type_section(node, scope, source, conditional),
             "declVars" | "declConsts" => self.collect_value_section(node, scope, source),
             "varDef" | "varAssignDef" => self.collect_inline_value_binding(node, scope, source),
@@ -600,6 +602,63 @@ impl ExceptionTypeIndex {
 
         if let Some(body) = routine.child_by_field_name("body") {
             self.collect_node(body, routine_scope, source, conditional);
+        }
+    }
+
+    fn collect_lambda(
+        &mut self,
+        lambda: Node,
+        enclosing_scope: LexicalScopeId,
+        source: &[u8],
+        conditional: bool,
+    ) {
+        let lambda_scope = self.new_scope(
+            Some(enclosing_scope),
+            lambda.start_byte(),
+            lambda.end_byte(),
+        );
+
+        if let Some(args) = field_named_children(lambda, "args").into_iter().next() {
+            let mut cursor = args.walk();
+            for argument in args.named_children(&mut cursor) {
+                if argument.kind() != "declArg" {
+                    continue;
+                }
+                for name in field_named_children(argument, "name") {
+                    self.add_binding(
+                        lambda_scope,
+                        canonical(node_text(name, source)),
+                        name.start_byte(),
+                        BindingKind::Value,
+                    );
+                }
+            }
+        }
+
+        for local in field_named_children(lambda, "local") {
+            self.collect_node(local, lambda_scope, source, conditional);
+        }
+
+        if let Some(body) = lambda.child_by_field_name("body") {
+            self.collect_node(body, lambda_scope, source, conditional);
+        }
+    }
+
+    fn collect_loop(
+        &mut self,
+        loop_node: Node,
+        enclosing_scope: LexicalScopeId,
+        source: &[u8],
+        conditional: bool,
+    ) {
+        let loop_scope = self.new_scope(
+            Some(enclosing_scope),
+            loop_node.start_byte(),
+            loop_node.end_byte(),
+        );
+        let mut cursor = loop_node.walk();
+        for child in loop_node.named_children(&mut cursor) {
+            self.collect_node(child, loop_scope, source, conditional);
         }
     }
 

@@ -574,6 +574,86 @@ end.
 }
 
 #[test]
+fn lambda_local_type_does_not_shadow_the_enclosing_routine_after_the_lambda() {
+    let source = r#"
+unit LambdaScope;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  Other = class constructor Create; end;
+procedure P;
+begin
+  Apply(function: Integer
+    type
+      E = Other;
+    begin
+      Result := 1;
+    end);
+  try
+    raise E.Create;
+  except
+    on Other do WrongLambda;
+    on E do CorrectOuter;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let outer = block_with_stmt(cfg, source, "statement", "CorrectOuter");
+    let lambda = block_with_stmt(cfg, source, "statement", "WrongLambda");
+
+    assert_eq!(
+        successors(cfg, successful_raise),
+        vec![(outer, EdgeKind::ExceptionThrow)],
+        "lambda-local declarations must not leak into the enclosing routine scope"
+    );
+    assert!(!successors(cfg, successful_raise).contains(&(lambda, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
+fn inline_for_variable_does_not_shadow_an_outer_type_after_the_loop() {
+    let source = r#"
+unit InlineForScope;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  Other = class constructor Create; end;
+procedure P;
+begin
+  for var E := 0 to 1 do
+    Work;
+  try
+    raise E.Create;
+  except
+    on Other do WrongLoop;
+    on E do CorrectOuter;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let outer = block_with_stmt(cfg, source, "statement", "CorrectOuter");
+    let loop_handler = block_with_stmt(cfg, source, "statement", "WrongLoop");
+
+    assert_eq!(
+        successors(cfg, successful_raise),
+        vec![(outer, EdgeKind::ExceptionThrow)],
+        "the inline for variable must not escape its loop scope"
+    );
+    assert!(!successors(cfg, successful_raise).contains(&(loop_handler, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
 fn implicit_function_values_shadow_same_named_global_types() {
     assert_successful_raise_reaches(
         r#"

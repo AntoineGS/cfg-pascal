@@ -1148,9 +1148,10 @@ struct FinalizerCacheKey {
     end_byte: usize,
     scope_id: ScopeId,
     continuation: Option<ContinuationKey>,
-    /// The enclosing finalizer walk supplies the remaining local suffix and
-    /// any suspended transfer. Different caller continuations therefore
-    /// cannot share an open normal-completion endpoint.
+    /// For a local normal completion, the enclosing finalizer walk supplies
+    /// the remaining suffix and any suspended transfer. An explicit transfer
+    /// already carries that continuation, so splitting its body by the
+    /// enclosing caller would duplicate every nested cleanup combination.
     caller_continuation: Option<FinalizerContinuationId>,
     cleanup_scopes: Vec<ScopeId>,
     loop_context: Vec<(BlockId, BlockId, Vec<ScopeId>, Vec<ScopeId>)>,
@@ -1163,16 +1164,21 @@ struct FinalizerCacheKey {
 
 /// Semantic identity of a finalizer's normal return continuation.
 ///
-/// The syntactic finalizer identifies the remaining local suffix, while the
-/// suspended transfer and enclosing continuation preserve the complete
-/// continuation chain. Handler-dispatch identities are deliberately absent:
-/// they are retained by [`FinalizerCacheKey`] for exceptional edges, but must
-/// not prevent equivalent normal suffixes from sharing.
+/// The syntactic finalizer identifies the remaining local suffix. The local
+/// continuation distinguishes normal completion inherited from the caller
+/// from a fresh transfer that happens to suspend the same transfer, while the
+/// suspended transfer and enclosing continuation preserve the complete chain.
+/// Handler-dispatch identities are deliberately absent: they are retained by
+/// [`FinalizerCacheKey`] for exceptional edges, but must not prevent equivalent
+/// normal suffixes from sharing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FinalizerContinuationKey {
     start_byte: usize,
     end_byte: usize,
     scope_id: ScopeId,
+    /// Distinguishes a caller-local normal completion from a fresh transfer
+    /// that happens to suspend the same continuation beyond this finalizer.
+    local_continuation: Option<ContinuationKey>,
     suspended_transfer: Option<ContinuationKey>,
     caller: Option<FinalizerContinuationId>,
 }
@@ -1306,12 +1312,21 @@ fn walk_or_reuse_finally_body(
     scope_id: ScopeId,
     continuation: Option<&ContinuationKey>,
 ) -> (BlockId, Flow) {
+    let caller_continuation = match continuation {
+        // A normal body resumes its enclosing finalizer's local suffix, so
+        // that suffix is part of its cache identity.
+        None => ctx.active_finalizer_continuation,
+        // A transfer body already carries the complete pending continuation;
+        // retaining the caller here would create a product of equivalent
+        // transfer bodies at every nested cleanup depth.
+        Some(_) => None,
+    };
     let cache_key = FinalizerCacheKey {
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
         scope_id,
         continuation: continuation.cloned(),
-        caller_continuation: ctx.active_finalizer_continuation,
+        caller_continuation,
         cleanup_scopes: ctx.cleanup_scopes.clone(),
         loop_context: ctx
             .loop_stack
@@ -1341,6 +1356,7 @@ fn walk_or_reuse_finally_body(
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
         scope_id,
+        local_continuation: continuation.cloned(),
         suspended_transfer: suspended_transfer.clone(),
         caller: ctx.active_finalizer_continuation,
     };

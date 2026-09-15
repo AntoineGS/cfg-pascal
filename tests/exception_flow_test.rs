@@ -820,6 +820,143 @@ end.
 }
 
 #[test]
+fn inherited_and_fresh_exit_continuations_do_not_collide() {
+    let source = br#"
+unit InheritedAndFreshExit;
+interface
+implementation
+
+procedure InheritedAndFreshExit;
+begin
+  try
+    Exit;
+  finally
+    try
+      if StopNow then
+        Exit;
+      InnerWork;
+    finally
+      try
+        DeepWork;
+      finally
+        DeepCleanup;
+      end;
+      InnerTail;
+    end;
+    TailCleanup;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "InheritedAndFreshExit");
+    let mut exits = blocks_with_exact_stmt(cfg, &source, "statement", "Exit;");
+    let inner_work = blocks_with_exact_stmt(cfg, &source, "statement", "InnerWork;");
+    let deep_cleanup = blocks_with_exact_stmt(cfg, &source, "statement", "DeepCleanup;");
+    let inner_tail = blocks_with_exact_stmt(cfg, &source, "statement", "InnerTail;");
+    let tail_cleanup = blocks_with_exact_stmt(cfg, &source, "statement", "TailCleanup;");
+
+    assert_eq!(exits.len(), 2);
+    assert!(!inner_work.is_empty());
+    assert!(!deep_cleanup.is_empty());
+    assert!(!inner_tail.is_empty());
+    assert!(!tail_cleanup.is_empty());
+
+    exits.sort_by_key(|block| {
+        cfg.graph[block.index()]
+            .stmts
+            .iter()
+            .map(|stmt| stmt.byte_range.start)
+            .min()
+            .expect("Exit statement source span")
+    });
+    let fresh_exit = exits[1];
+
+    assert!(inner_work
+        .iter()
+        .any(|work| can_reach_non_exception(cfg, *work, tail_cleanup[0])));
+    assert!(inner_work
+        .iter()
+        .all(|work| { !can_reach_non_exception_avoiding(cfg, *work, cfg.exit, &tail_cleanup) }));
+    assert!(deep_cleanup
+        .iter()
+        .any(|cleanup| can_reach_non_exception(cfg, fresh_exit, *cleanup)));
+    assert!(!tail_cleanup
+        .iter()
+        .any(|tail| can_reach(cfg, fresh_exit, *tail)));
+    assert!(inner_tail
+        .iter()
+        .any(|tail| can_reach_non_exception(cfg, fresh_exit, *tail)));
+}
+
+#[test]
+fn inherited_and_fresh_exception_continuations_do_not_collide() {
+    let source = br#"
+unit InheritedAndFreshException;
+interface
+implementation
+
+procedure InheritedAndFreshException;
+begin
+  try
+    raise OuterError;
+  finally
+    try
+      if ThrowNow then
+        raise Error;
+      InnerWork;
+    finally
+      try
+        DeepWork;
+      finally
+        DeepCleanup;
+      end;
+      InnerTail;
+    end;
+    TailCleanup;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "InheritedAndFreshException");
+    let inner_work = blocks_with_exact_stmt(cfg, &source, "statement", "InnerWork;");
+    let fresh_raise = block_with_stmt(cfg, &source, "raise", "raise Error;");
+    let deep_cleanup = blocks_with_exact_stmt(cfg, &source, "statement", "DeepCleanup;");
+    let inner_tail = blocks_with_exact_stmt(cfg, &source, "statement", "InnerTail;");
+    let tail_cleanup = blocks_with_exact_stmt(cfg, &source, "statement", "TailCleanup;");
+
+    assert!(!inner_work.is_empty());
+    assert!(!deep_cleanup.is_empty());
+    assert!(!inner_tail.is_empty());
+    assert!(!tail_cleanup.is_empty());
+
+    assert!(inner_work
+        .iter()
+        .any(|work| can_reach_non_exception(cfg, *work, tail_cleanup[0])));
+    assert!(inner_work
+        .iter()
+        .all(|work| { !can_reach_non_exception_avoiding(cfg, *work, cfg.exit, &tail_cleanup) }));
+    assert!(deep_cleanup
+        .iter()
+        .any(|cleanup| can_reach(cfg, fresh_raise, *cleanup)));
+    assert!(!tail_cleanup
+        .iter()
+        .any(|tail| can_reach(cfg, fresh_raise, *tail)));
+    assert!(inner_tail
+        .iter()
+        .any(|tail| can_reach(cfg, fresh_raise, *tail)));
+}
+
+#[test]
 fn nested_finalizers_with_local_catches_have_bounded_release_cfg() {
     const DEPTH: usize = 12;
     let mut body = String::from("LeafCleanup;");

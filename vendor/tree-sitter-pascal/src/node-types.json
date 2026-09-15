@@ -6742,7 +6742,7 @@
     "fields": {
       "exception": {
         "multiple": true,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "exprBinary",

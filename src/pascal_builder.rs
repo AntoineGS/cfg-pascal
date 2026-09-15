@@ -1140,7 +1140,7 @@ fn handle_preprocessor_block(ctx: &mut BuildContext<'_>, node: Node, current: Bl
         match child.kind() {
             "ppIf" | "ppEndIf" | "ppDirective" | "ppText" => continue,
             "ppElse" => {
-                has_else = true;
+                has_else = has_else || is_unconditional_preprocessor_else(child, ctx.source);
                 branches.push(Vec::new());
             }
             ";" | "," => continue,
@@ -1194,6 +1194,17 @@ fn handle_preprocessor_block(ctx: &mut BuildContext<'_>, node: Node, current: Bl
     };
 
     Flow { normal, transfers }
+}
+
+fn is_unconditional_preprocessor_else(node: Node, source: &[u8]) -> bool {
+    let directive = node_text(node, source);
+    let directive = directive.trim();
+    let directive = directive.strip_prefix("{$").unwrap_or(directive);
+    let directive = directive.strip_suffix('}').unwrap_or(directive);
+    directive
+        .split_whitespace()
+        .next()
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("else"))
 }
 
 fn walk_labeled_statement(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {

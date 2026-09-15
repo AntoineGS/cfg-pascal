@@ -368,6 +368,41 @@ end.
 }
 
 #[test]
+fn preprocessor_elseif_retains_the_no_match_path_through_nested_blocks() {
+    let source = br#"
+unit ConditionalElseIf;
+interface
+implementation
+
+procedure ConditionalElseIf;
+begin
+  {$IFDEF OUTER}
+    {$IFDEF INNER}
+    Exit;
+    {$ELSEIF INNER_ALT}
+    Exit;
+    {$ENDIF}
+  {$ELSEIF OUTER_ALT}
+    Exit;
+  {$ENDIF}
+  AfterAllConditions;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ConditionalElseIf");
+    let after = block_with_stmt(cfg, &source, "statement", "AfterAllConditions");
+
+    assert!(
+        cfg.is_reachable(cfg.entry, after),
+        "all unknown preprocessor conditions may be false, so the post-conditional path must remain reachable"
+    );
+}
+
+#[test]
 fn preprocessor_statement_blocks_preserve_loop_controls_and_finally_labels() {
     let source = br#"
 unit ConditionalTransfers;

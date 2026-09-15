@@ -307,3 +307,118 @@ end.
         );
     }
 }
+
+#[test]
+fn typed_handlers_are_alternatives_and_unknown_exceptions_propagate() {
+    let source = br#"
+unit TypedHandlers;
+interface
+implementation
+
+procedure TypedAlternatives;
+begin
+  try
+    raise E;
+  except
+    on E: FirstException do
+      FirstHandler;
+    on E: SecondException do
+      SecondHandler;
+  end;
+  AfterTyped;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "TypedAlternatives");
+
+    let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise E");
+    let first_handler = block_with_stmt(cfg, &source, "statement", "FirstHandler");
+    let second_handler = block_with_stmt(cfg, &source, "statement", "SecondHandler");
+    let after = block_with_stmt(cfg, &source, "statement", "AfterTyped");
+    let raise_successors = successors(cfg, raise_stmt);
+
+    assert!(raise_successors.contains(&(first_handler, EdgeKind::ExceptionThrow)));
+    assert!(raise_successors.contains(&(second_handler, EdgeKind::ExceptionThrow)));
+    assert!(raise_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+    assert!(!can_reach(cfg, first_handler, second_handler));
+    assert!(!can_reach(cfg, second_handler, first_handler));
+    assert!(can_reach(cfg, first_handler, after));
+    assert!(can_reach(cfg, second_handler, after));
+}
+
+#[test]
+fn plain_except_and_exception_else_walk_all_handler_statements() {
+    let source = br#"
+unit BareHandlers;
+interface
+implementation
+
+procedure PlainExcept;
+begin
+  try
+    WorkPlain;
+  except
+    PlainFirst;
+    PlainSecond;
+  end;
+  AfterPlain;
+end;
+
+procedure ExceptionElse;
+begin
+  try
+    WorkElse;
+  except
+    on E: KnownException do
+      TypedElse;
+  else
+    ElseFirst;
+    ElseSecond;
+  end;
+  AfterElse;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let plain_cfg = cfg_for(&cfgs, "PlainExcept");
+    let plain_first = block_with_stmt(plain_cfg, &source, "statement", "PlainFirst");
+    let plain_second = block_with_stmt(plain_cfg, &source, "statement", "PlainSecond");
+    let after_plain = block_with_stmt(plain_cfg, &source, "statement", "AfterPlain");
+    assert!(can_reach(plain_cfg, plain_first, plain_second));
+    assert!(can_reach(plain_cfg, plain_second, after_plain));
+    assert_eq!(
+        plain_cfg.graph[plain_first.index()].kind,
+        BasicBlockKind::BareExceptHandler
+    );
+
+    let else_cfg = cfg_for(&cfgs, "ExceptionElse");
+    let else_first = block_with_stmt(else_cfg, &source, "statement", "ElseFirst");
+    let else_second = block_with_stmt(else_cfg, &source, "statement", "ElseSecond");
+    let typed_else = block_with_stmt(else_cfg, &source, "statement", "TypedElse");
+    let after_else = block_with_stmt(else_cfg, &source, "statement", "AfterElse");
+    let work_else = block_with_stmt(else_cfg, &source, "statement", "WorkElse");
+    let bare_handler = else_cfg
+        .graph
+        .node_indices()
+        .find_map(|index| {
+            let block = &else_cfg.graph[index];
+            (block.kind == BasicBlockKind::BareExceptHandler).then(|| BlockId::from(index))
+        })
+        .expect("exceptionElse must have a bare handler block");
+
+    assert!(can_reach(else_cfg, else_first, else_second));
+    assert!(can_reach(else_cfg, else_second, after_else));
+    assert!(can_reach(else_cfg, typed_else, after_else));
+    assert!(
+        successors(else_cfg, work_else).contains(&(bare_handler, EdgeKind::ExceptionThrow)),
+        "unknown protected exceptions must dispatch to exceptionElse"
+    );
+}

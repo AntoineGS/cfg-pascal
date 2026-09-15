@@ -192,7 +192,18 @@ impl PendingTransfer {
 /// conservative all-handler/unmatched dispatch.
 pub(crate) fn raised_exception_type(node: Node, source: &[u8]) -> Option<String> {
     let exception = node.child_by_field_name("exception")?;
-    leading_identifier(exception, source)
+    match exception.kind() {
+        "exprCall" => leading_identifier(exception, source),
+        "exprParens" => {
+            let mut cursor = exception.walk();
+            let exception_type = exception
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "exprCall")
+                .and_then(|child| leading_identifier(child, source));
+            exception_type
+        }
+        _ => None,
+    }
 }
 
 fn leading_identifier(node: Node, source: &[u8]) -> Option<String> {

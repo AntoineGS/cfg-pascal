@@ -103,6 +103,7 @@ enum TypeDefinition {
         parent: ParentType,
         has_create_constructor: bool,
         has_create_member: bool,
+        incomplete: bool,
     },
     Alias {
         target: Option<TypeReference>,
@@ -287,6 +288,7 @@ impl ExceptionTypeIndex {
             "defProc" => self.collect_routine(node, scope, source, conditional),
             "declTypes" => self.collect_type_section(node, scope, source, conditional),
             "declVars" | "declConsts" => self.collect_value_section(node, scope, source),
+            "varDef" | "varAssignDef" => self.collect_inline_value_binding(node, scope, source),
             "declProc" => self.collect_proc_binding(node, scope, source, conditional),
             "exceptionHandler" => self.collect_exception_handler(node, scope, source, conditional),
             _ => {
@@ -328,6 +330,18 @@ impl ExceptionTypeIndex {
                 );
             }
         }
+    }
+
+    fn collect_inline_value_binding(&mut self, node: Node, scope: LexicalScopeId, source: &[u8]) {
+        let Some(name) = direct_named_child(node, "identifier") else {
+            return;
+        };
+        self.add_binding(
+            scope,
+            canonical(node_text(name, source)),
+            name.start_byte(),
+            BindingKind::Value,
+        );
     }
 
     fn collect_type_declaration(
@@ -378,6 +392,7 @@ impl ExceptionTypeIndex {
             "declClass" if direct_named_child(type_node, "kClass").is_some() => {
                 let class_scope =
                     self.new_scope(Some(scope), type_node.start_byte(), type_node.end_byte());
+                let incomplete = direct_named_child(type_node, "kEnd").is_none();
                 let parent = self.class_parent(type_node, scope, source);
                 let has_create_constructor =
                     self.collect_class_members(type_node, class_scope, source);
@@ -390,6 +405,7 @@ impl ExceptionTypeIndex {
                     parent,
                     has_create_constructor,
                     has_create_member,
+                    incomplete,
                 }
             }
             "declClass" | "declIntf" | "declHelper" | "declMetaClass" => {
@@ -804,12 +820,18 @@ impl ExceptionTypeIndex {
         let TypeDefinition::Class {
             class_scope,
             parent,
+            incomplete,
             ..
         } = &self.types[type_id.0].definition
         else {
             seen.remove(&type_id);
             return Some(Lookup::Unknown);
         };
+
+        if *incomplete {
+            seen.remove(&type_id);
+            return Some(Lookup::Unknown);
+        }
 
         if self.has_binding(*class_scope, name, offset) {
             let result = self.lookup_direct_before(*class_scope, name, offset);
@@ -852,7 +874,12 @@ impl ExceptionTypeIndex {
         }
 
         let resolved = match &self.types[type_id.0].definition {
-            TypeDefinition::Class { .. } => Some(type_id),
+            TypeDefinition::Class {
+                incomplete: true, ..
+            } => None,
+            TypeDefinition::Class {
+                incomplete: false, ..
+            } => Some(type_id),
             TypeDefinition::Alias {
                 target: Some(target),
             } => self.resolve_parts_with_seen(&target.parts, target.scope, target.offset, seen),
@@ -877,6 +904,9 @@ impl ExceptionTypeIndex {
         }
 
         let result = match &self.types[type_id.0].definition {
+            TypeDefinition::Class {
+                incomplete: true, ..
+            } => Knowledge::Unknown,
             TypeDefinition::Class {
                 has_create_constructor: true,
                 ..
@@ -924,9 +954,15 @@ impl ExceptionTypeIndex {
                 return TypeMatch::Unknown;
             }
 
-            let TypeDefinition::Class { parent, .. } = &self.types[current.0].definition else {
+            let TypeDefinition::Class {
+                parent, incomplete, ..
+            } = &self.types[current.0].definition
+            else {
                 return TypeMatch::Unknown;
             };
+            if *incomplete {
+                return TypeMatch::Unknown;
+            }
             let ParentType::Reference(parent) = parent else {
                 return match parent {
                     ParentType::None => TypeMatch::No,
@@ -957,9 +993,16 @@ impl ExceptionTypeIndex {
     }
 
     fn class_scope(&self, type_id: TypeId) -> Option<LexicalScopeId> {
-        match self.types[type_id.0].definition {
-            TypeDefinition::Class { class_scope, .. } => Some(class_scope),
+        match &self.types[type_id.0].definition {
+            TypeDefinition::Class {
+                class_scope,
+                incomplete: false,
+                ..
+            } => Some(*class_scope),
             TypeDefinition::Alias { .. } | TypeDefinition::Unsupported => None,
+            TypeDefinition::Class {
+                incomplete: true, ..
+            } => None,
         }
     }
 

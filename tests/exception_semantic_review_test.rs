@@ -70,6 +70,28 @@ fn successful_raise_block(cfg: &Cfg, raise: BlockId) -> BlockId {
         .expect("constructor raise must have a synthetic successful-raise block")
 }
 
+fn assert_successful_raise_retains_handlers(
+    source: &str,
+    procedure: &str,
+    raise_text: &str,
+    handler_texts: &[&str],
+) {
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, procedure);
+    let raise = block_with_stmt(cfg, source, "raise", raise_text);
+    let successful_raise = successful_raise_block(cfg, raise);
+    let successful_successors = successors(cfg, successful_raise);
+
+    for handler_text in handler_texts {
+        let handler = block_with_stmt(cfg, source, "statement", handler_text);
+        assert!(
+            successful_successors.contains(&(handler, EdgeKind::ExceptionThrow)),
+            "successful raise must retain handler {handler_text:?}"
+        );
+    }
+}
+
 fn assert_successful_raise_reaches(source: &str, procedure: &str, raise_text: &str, handler: &str) {
     let tree = parse_clean(source);
     let cfgs = build_file_cfgs(&tree, source.as_bytes());
@@ -333,6 +355,123 @@ end.
     assert!(successful_successors.contains(&(first, EdgeKind::ExceptionThrow)));
     assert!(successful_successors.contains(&(second, EdgeKind::ExceptionThrow)));
     assert!(successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
+fn initialized_typed_inline_variables_shadow_global_exception_types_conservatively() {
+    assert_successful_raise_retains_handlers(
+        r#"
+unit U;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  B = class(E) end;
+  Meta = class of E;
+procedure P;
+begin
+  var E: Meta := B;
+  try
+    raise E.Create;
+  except
+    on U.B do Correct;
+    on U.E do Wrong;
+  end;
+end;
+end.
+"#,
+        "P",
+        "raise E.Create",
+        &["Correct"],
+    );
+}
+
+#[test]
+fn initialized_inferred_inline_variables_shadow_global_exception_types_conservatively() {
+    assert_successful_raise_retains_handlers(
+        r#"
+unit U;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  B = class(E) end;
+procedure P;
+begin
+  var E := B;
+  try
+    raise E.Create;
+  except
+    on U.B do Correct;
+    on U.E do Wrong;
+  end;
+end;
+end.
+"#,
+        "P",
+        "raise E.Create",
+        &["Correct"],
+    );
+}
+
+#[test]
+fn nested_inline_var_definitions_are_collected_without_global_fallback() {
+    assert_successful_raise_retains_handlers(
+        r#"
+unit U;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  B = class(E) end;
+  Meta = class of E;
+procedure P;
+begin
+  begin
+    var E: Meta;
+    E := B;
+    try
+      raise E.Create;
+    except
+      on U.B do Correct;
+      on U.E do Wrong;
+    end;
+  end;
+end;
+end.
+"#,
+        "P",
+        "raise E.Create",
+        &["Correct"],
+    );
+}
+
+#[test]
+fn aliases_of_forward_classes_remain_conservative_until_the_definition_is_complete() {
+    assert_successful_raise_retains_handlers(
+        r#"
+unit U;
+interface
+implementation
+type
+  E = class;
+  AliasE = E;
+  E = class constructor Create; end;
+procedure P;
+begin
+  try
+    raise E.Create;
+  except
+    on AliasE do Correct;
+    on E do Wrong;
+  end;
+end;
+end.
+"#,
+        "P",
+        "raise E.Create",
+        &["Correct"],
+    );
 }
 
 #[test]

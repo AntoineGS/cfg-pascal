@@ -570,3 +570,87 @@ end.
     assert!(!can_reach(cfg, first_cleanup, second_body));
     assert!(!can_reach(cfg, second_cleanup, first_body));
 }
+
+#[test]
+fn cloned_cleanup_gotos_stay_in_their_own_instance() {
+    let source = br#"
+unit ClonedCleanupGotos;
+interface
+implementation
+
+procedure ClonedCleanupGotos;
+begin
+  try
+    if LeaveNow then
+      Exit;
+    Work;
+  finally
+    goto Done;
+  Done:
+    Cleanup;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ClonedCleanupGotos");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+    let labels = blocks_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(gotos.len(), labels.len());
+    assert!(gotos.len() >= 2);
+    for (goto, label) in gotos.into_iter().zip(labels) {
+        assert!(
+            successors(cfg, goto)
+                .iter()
+                .any(|(target, _)| *target == label),
+            "goto {goto:?} must target its same-clone label {label:?}"
+        );
+    }
+}
+
+#[test]
+fn goto_after_nested_cleanup_clones_retains_the_later_scope_identity() {
+    let source = br#"
+unit LaterScopeIdentity;
+interface
+implementation
+
+procedure LaterScopeIdentity;
+begin
+  try
+    Work;
+  finally
+    try
+      NestedWork;
+    finally
+      NestedCleanup;
+    end;
+  end;
+  try
+    goto Done;
+  Done:
+    TargetBody;
+  finally
+    LaterCleanup;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "LaterScopeIdentity");
+    let goto = block_with_stmt(cfg, &source, "goto", "goto Done");
+    let label = block_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(
+        successors(cfg, goto),
+        vec![(label, EdgeKind::Goto)],
+        "a same-scope goto must not enter the later finally"
+    );
+}

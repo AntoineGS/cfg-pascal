@@ -114,6 +114,11 @@ pub(crate) fn is_continue_call(node: Node, source: &[u8]) -> bool {
 /// when the transfer itself originated in a nested scope.
 pub(crate) type ScopeId = usize;
 
+/// Identifier for one CFG-construction walk of a label namespace. The root
+/// procedure body has one binding, while each cloned finalizer body gets a
+/// distinct binding so deferred gotos resolve within their own clone.
+pub(crate) type LabelBindingId = usize;
+
 /// The kind of abrupt completion produced by a statement or expression.
 ///
 /// `Goto` carries a label target and the target scope set, allowing cleanup
@@ -135,6 +140,7 @@ pub(crate) struct PendingTransfer {
     pub kind: TransferKind,
     pub target: Option<BlockId>,
     pub target_label: Option<String>,
+    pub target_label_binding: Option<LabelBindingId>,
     pub target_scopes: Vec<ScopeId>,
     pub from_finally: bool,
     pub exception_type: Option<String>,
@@ -147,6 +153,7 @@ impl PendingTransfer {
             kind: TransferKind::Exit,
             target: None,
             target_label: None,
+            target_label_binding: None,
             target_scopes: Vec::new(),
             from_finally: false,
             exception_type: None,
@@ -165,6 +172,7 @@ impl PendingTransfer {
             kind,
             target: Some(target),
             target_label: None,
+            target_label_binding: None,
             target_scopes,
             from_finally: false,
             exception_type: None,
@@ -177,6 +185,7 @@ impl PendingTransfer {
             kind: TransferKind::Exception,
             target: None,
             target_label: None,
+            target_label_binding: None,
             target_scopes: Vec::new(),
             from_finally: false,
             exception_type: None,
@@ -190,12 +199,18 @@ impl PendingTransfer {
         }
     }
 
-    pub(crate) fn goto(source: BlockId, target_label: String, target_scopes: Vec<ScopeId>) -> Self {
+    pub(crate) fn goto(
+        source: BlockId,
+        target_label: String,
+        target_label_binding: LabelBindingId,
+        target_scopes: Vec<ScopeId>,
+    ) -> Self {
         Self {
             source,
             kind: TransferKind::Goto,
             target: None,
             target_label: Some(target_label),
+            target_label_binding: Some(target_label_binding),
             target_scopes,
             from_finally: false,
             exception_type: None,
@@ -219,6 +234,7 @@ impl PendingTransfer {
             kind: self.kind,
             target: self.target,
             target_label: self.target_label.clone(),
+            target_label_binding: self.target_label_binding,
             target_scopes: self.target_scopes.clone(),
             from_finally: true,
             exception_type: self.exception_type.clone(),

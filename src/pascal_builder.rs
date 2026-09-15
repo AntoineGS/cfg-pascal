@@ -8,8 +8,8 @@ use tree_sitter::Node;
 
 use crate::constructs::{
     exit_has_argument, is_break_call, is_continue_call, is_exit_call, node_text,
-    raise_may_throw_during_evaluation, raised_exception_type, Flow, LoopFrame, PendingTransfer,
-    ScopeId, TransferKind,
+    raise_may_throw_during_evaluation, raised_exception_type, Flow, LabelBindingId, LoopFrame,
+    PendingTransfer, ScopeId, TransferKind,
 };
 
 /// Build CFGs for all procedure/function definitions in a parsed Pascal file.
@@ -55,8 +55,16 @@ fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
     builder.add_edge(entry, body, EdgeKind::Normal);
 
     let mut label_scopes = HashMap::new();
+    let mut scope_ids = HashMap::new();
     let mut label_scope_id = 0;
-    collect_label_scopes(block, source, &[], &mut label_scope_id, &mut label_scopes);
+    collect_label_scopes(
+        block,
+        source,
+        &[],
+        &mut label_scope_id,
+        &mut scope_ids,
+        &mut label_scopes,
+    );
 
     let mut ctx = BuildContext {
         builder: &mut builder,
@@ -64,7 +72,9 @@ fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
         source,
         loop_stack: Vec::new(),
         cleanup_scopes: Vec::new(),
-        next_scope_id: 0,
+        scope_ids,
+        current_label_binding: 0,
+        next_label_binding: 1,
         implicit_exception_depth: 0,
         block_has_stmt: HashSet::new(),
         label_scopes,
@@ -82,6 +92,7 @@ fn collect_label_scopes(
     source: &[u8],
     active_scopes: &[ScopeId],
     next_scope_id: &mut ScopeId,
+    scope_ids: &mut HashMap<(usize, usize), ScopeId>,
     labels: &mut HashMap<String, Vec<ScopeId>>,
 ) {
     if node.kind() == "defProc" {
@@ -101,15 +112,23 @@ fn collect_label_scopes(
     if node.kind() == "try" && try_has_finally(node) {
         let scope_id = *next_scope_id;
         *next_scope_id += 1;
+        scope_ids.insert((node.start_byte(), node.end_byte()), scope_id);
         let mut try_scopes = active_scopes.to_vec();
         try_scopes.push(scope_id);
 
         for child in field_children(node, "try") {
-            collect_label_scopes(child, source, &try_scopes, next_scope_id, labels);
+            collect_label_scopes(child, source, &try_scopes, next_scope_id, scope_ids, labels);
         }
         for field in ["except", "finally"] {
             for child in field_children(node, field) {
-                collect_label_scopes(child, source, active_scopes, next_scope_id, labels);
+                collect_label_scopes(
+                    child,
+                    source,
+                    active_scopes,
+                    next_scope_id,
+                    scope_ids,
+                    labels,
+                );
             }
         }
         return;
@@ -117,7 +136,14 @@ fn collect_label_scopes(
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_label_scopes(child, source, active_scopes, next_scope_id, labels);
+        collect_label_scopes(
+            child,
+            source,
+            active_scopes,
+            next_scope_id,
+            scope_ids,
+            labels,
+        );
     }
 }
 
@@ -193,7 +219,13 @@ struct BuildContext<'a> {
     source: &'a [u8],
     loop_stack: Vec<LoopFrame>,
     cleanup_scopes: Vec<ScopeId>,
-    next_scope_id: ScopeId,
+    /// Stable IDs for syntactic try/finally scopes, shared by all runtime
+    /// clones of the same finalizer body.
+    scope_ids: HashMap<(usize, usize), ScopeId>,
+    /// The label namespace for the walk currently being constructed.
+    current_label_binding: LabelBindingId,
+    /// Fresh namespace IDs for cloned finalizer walks.
+    next_label_binding: LabelBindingId,
     /// Nonzero while walking a try body, handler, or finally body.  This is
     /// intentionally independent from `cleanup_scopes`: handlers/finalizers
     /// may throw outward even though the scope whose handler they belong to
@@ -206,7 +238,7 @@ struct BuildContext<'a> {
     /// so forward gotos can be routed through finalizers precisely.
     label_scopes: HashMap<String, Vec<ScopeId>>,
     /// Label targets discovered while walking the procedure body.
-    label_targets: HashMap<String, BlockId>,
+    label_targets: HashMap<(LabelBindingId, String), BlockId>,
 }
 
 fn new_block(ctx: &mut BuildContext<'_>, kind: BasicBlockKind) -> BlockId {
@@ -239,10 +271,11 @@ fn route_transfer(ctx: &mut BuildContext<'_>, transfer: PendingTransfer) {
         }
         TransferKind::Goto => {
             let target = transfer.target.or_else(|| {
-                transfer
-                    .target_label
-                    .as_ref()
-                    .and_then(|label| ctx.label_targets.get(label).copied())
+                transfer.target_label.as_ref().and_then(|label| {
+                    transfer.target_label_binding.and_then(|binding| {
+                        ctx.label_targets.get(&(binding, label.clone())).copied()
+                    })
+                })
             });
             if let Some(target) = target {
                 ctx.builder
@@ -681,7 +714,8 @@ fn register_label(ctx: &mut BuildContext<'_>, label: Node, current: BlockId) -> 
 
     if let Some(identifier) = direct_child(label, "identifier") {
         let name = normalize_label_name(node_text(identifier, ctx.source));
-        ctx.label_targets.insert(name, target);
+        ctx.label_targets
+            .insert((ctx.current_label_binding, name), target);
     }
     add_stmt_ref(ctx, target, label);
     target
@@ -768,7 +802,12 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
                 .map(|identifier| normalize_label_name(node_text(identifier, ctx.source)))
                 .unwrap_or_default();
             let target_scopes = ctx.label_scopes.get(&label).cloned().unwrap_or_default();
-            Flow::transfer(PendingTransfer::goto(statement_block, label, target_scopes))
+            Flow::transfer(PendingTransfer::goto(
+                statement_block,
+                label,
+                ctx.current_label_binding,
+                target_scopes,
+            ))
         }
         _ => {
             let statement_block = prepare_statement_block(ctx, current);
@@ -814,6 +853,7 @@ enum FinalizerKey {
         kind: TransferKind,
         target: Option<BlockId>,
         target_label: Option<String>,
+        target_label_binding: Option<LabelBindingId>,
         target_scopes: Vec<ScopeId>,
         exception_type: Option<String>,
     },
@@ -830,6 +870,7 @@ impl FinalizerKey {
                     .target_label
                     .as_ref()
                     .map(|label| label.to_ascii_lowercase()),
+                target_label_binding: transfer.target_label_binding,
                 target_scopes: transfer.target_scopes.clone(),
                 exception_type: transfer
                     .exception_type
@@ -852,8 +893,11 @@ struct FinalizerGroup {
 /// pending transfer is equivalent. Distinct normal, return, loop-target, and
 /// exception continuations retain separate cleanup paths.
 fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
-    let scope_id = ctx.next_scope_id;
-    ctx.next_scope_id += 1;
+    let scope_id = ctx
+        .scope_ids
+        .get(&(node.start_byte(), node.end_byte()))
+        .copied()
+        .expect("try/finally scope missing from prepass");
     let after_block = new_block(ctx, BasicBlockKind::Normal);
 
     ctx.cleanup_scopes.push(scope_id);
@@ -911,7 +955,12 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
         }
 
         ctx.implicit_exception_depth += 1;
+        let previous_label_binding = ctx.current_label_binding;
+        let label_binding = ctx.next_label_binding;
+        ctx.next_label_binding += 1;
+        ctx.current_label_binding = label_binding;
         let finally_flow = walk_finally_body(ctx, node, finally_block);
+        ctx.current_label_binding = previous_label_binding;
         ctx.implicit_exception_depth -= 1;
 
         if let Some(finally_end) = finally_flow.normal {

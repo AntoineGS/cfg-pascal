@@ -317,7 +317,7 @@ function statements(trailing) {
 }
 
 module.exports = grammar({
-	name: "pascal",
+	name: "cfg_pascal",
 
 	externals: $ => [$.ppFragmentExpr, $.ppFragmentStmt],
 

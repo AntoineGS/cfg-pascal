@@ -1,4 +1,4 @@
-// External scanner for tree-sitter-pascal.
+// External scanner for cfg-tree-sitter-pascal.
 //
 // Recognizes single-line `{$ifdef ...}...{$endif}` directive pairs and
 // consumes the whole paired span as ONE opaque token — either
@@ -52,21 +52,21 @@ static bool skip_to_close_brace(TSLexer *lexer) {
     return false;
 }
 
-void *tree_sitter_pascal_external_scanner_create(void) {
+void *tree_sitter_cfg_pascal_external_scanner_create(void) {
     return NULL;
 }
 
-void tree_sitter_pascal_external_scanner_destroy(void *payload) {
+void tree_sitter_cfg_pascal_external_scanner_destroy(void *payload) {
     (void)payload;
 }
 
-unsigned tree_sitter_pascal_external_scanner_serialize(void *payload, char *buffer) {
+unsigned tree_sitter_cfg_pascal_external_scanner_serialize(void *payload, char *buffer) {
     (void)payload;
     (void)buffer;
     return 0;
 }
 
-void tree_sitter_pascal_external_scanner_deserialize(
+void tree_sitter_cfg_pascal_external_scanner_deserialize(
     void *payload,
     const char *buffer,
     unsigned length
@@ -76,7 +76,7 @@ void tree_sitter_pascal_external_scanner_deserialize(
     (void)length;
 }
 
-bool tree_sitter_pascal_external_scanner_scan(
+bool tree_sitter_cfg_pascal_external_scanner_scan(
     void *payload,
     TSLexer *lexer,
     const bool *valid_symbols

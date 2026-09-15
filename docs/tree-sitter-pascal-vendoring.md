@@ -15,12 +15,21 @@ upstream corpus is merged with cfg-pascal's regression corpus under
 `vendor/tree-sitter-pascal/test/corpus`; the upstream files are copied from the
 same commit rather than from an untracked sibling worktree.
 
-The crate dependency is a repository-relative path, so consumers do not need
-the developer's Cargo registry path. `cfg_pascal::LANGUAGE` is the language
-function for this patched parser. Consumers that previously obtained
-`tree_sitter_pascal::LANGUAGE` from a separately selected or unpatched crate
-should use the re-export instead; existing `build_file_cfgs` callers and
+The vendored package is named `cfg-tree-sitter-pascal` to distinguish its Cargo
+package identity from the upstream `tree-sitter-pascal` package. The root crate
+keeps the dependency key `tree-sitter-pascal` as an alias for that local package,
+so its existing internal `tree_sitter_pascal::LANGUAGE` imports and public
+`cfg_pascal::LANGUAGE` re-export remain unchanged. Consumers that previously
+obtained `tree_sitter_pascal::LANGUAGE` from a separately selected or unpatched
+crate should use the re-export instead; existing `build_file_cfgs` callers and
 already-parsed `tree_sitter::Tree` values remain source-compatible.
+
+The local grammar is also given a distinct native ABI: its generated language
+function is `tree_sitter_cfg_pascal`, and its external scanner functions use the
+matching `tree_sitter_cfg_pascal_external_scanner_*` prefix. This is required in
+addition to the Cargo package rename because the upstream parser may be linked
+into the same binary by LSP consumers and tests. The upstream Git parser keeps
+its original `tree_sitter_pascal*` symbols.
 
 ## Local grammar changes
 
@@ -35,7 +44,9 @@ The vendored grammar starts at upstream 0.11.0. Task 1 adds only:
 
 Generated `src/parser.c`, `src/grammar.json`, and `src/node-types.json` must
 always be regenerated together with the pinned CLI. The external scanner is
-compiled by `bindings/rust/build.rs`; do not edit generated artifacts by hand.
+compiled by `bindings/rust/build.rs`; its exported functions must retain the
+local `tree_sitter_cfg_pascal*` prefix when the generated parser is refreshed.
+Do not edit generated parser artifacts by hand.
 
 ## Regeneration and corpus tests
 

@@ -206,40 +206,88 @@ impl PendingTransfer {
     }
 }
 
-/// Infer the concrete type from a simple `raise TException.Create(...)`
-/// expression. More complex expressions remain unknown and therefore use the
-/// conservative all-handler/unmatched dispatch.
+/// Preserve the syntactic constructor name from `raise TException.Create(...)`.
+///
+/// This is metadata only: without a semantic type resolver it must not be
+/// used to eliminate typed handlers. Calls such as `raise MakeError()` remain
+/// unknown because the function's return type is not available here.
 pub(crate) fn raised_exception_type(node: Node, source: &[u8]) -> Option<String> {
     let exception = node.child_by_field_name("exception")?;
     match exception.kind() {
-        "exprCall" => leading_identifier(exception, source),
+        "exprCall" => constructor_type(exception, source),
         "exprParens" => {
             let mut cursor = exception.walk();
             let exception_type = exception
                 .named_children(&mut cursor)
                 .find(|child| child.kind() == "exprCall")
-                .and_then(|child| leading_identifier(child, source));
+                .and_then(|child| constructor_type(child, source));
             exception_type
         }
         _ => None,
     }
 }
 
-fn leading_identifier(node: Node, source: &[u8]) -> Option<String> {
+/// Whether evaluating the raised expression can produce a separate exception.
+///
+/// Constructor calls are executable expressions: even when their syntactic
+/// type is retained as metadata, evaluating the arguments or running the
+/// constructor may raise a different exception.
+pub(crate) fn raise_may_throw_during_evaluation(node: Node) -> bool {
+    let Some(exception) = node.child_by_field_name("exception") else {
+        return false;
+    };
+    if exception.kind() == "exprCall" {
+        return true;
+    }
+    if exception.kind() == "exprParens" {
+        let mut cursor = exception.walk();
+        return exception
+            .named_children(&mut cursor)
+            .any(raise_may_throw_during_evaluation_expression);
+    }
+    false
+}
+
+fn raise_may_throw_during_evaluation_expression(node: Node) -> bool {
+    if node.kind() == "exprCall" {
+        return true;
+    }
+    if node.kind() == "exprParens" {
+        let mut cursor = node.walk();
+        return node
+            .named_children(&mut cursor)
+            .any(raise_may_throw_during_evaluation_expression);
+    }
+    false
+}
+
+fn constructor_type(node: Node, source: &[u8]) -> Option<String> {
+    let entity = node.child_by_field_name("entity")?;
+    let mut parts = qualified_parts(entity, source)?;
+    let constructor = parts.pop()?;
+    constructor
+        .eq_ignore_ascii_case("create")
+        .then_some(parts.join("."))
+        .filter(|exception_type| !exception_type.is_empty())
+}
+
+fn qualified_parts(node: Node, source: &[u8]) -> Option<Vec<String>> {
     match node.kind() {
-        "identifier" => Some(node_text(node, source)),
-        "exprCall" => node
-            .child_by_field_name("entity")
-            .and_then(|entity| leading_identifier(entity, source)),
+        "identifier" => Some(vec![node_text(node, source)]),
         "exprDot" => node
             .child_by_field_name("lhs")
-            .and_then(|lhs| leading_identifier(lhs, source)),
+            .and_then(|lhs| qualified_parts(lhs, source))
+            .and_then(|mut parts| {
+                let rhs = node.child_by_field_name("rhs")?;
+                parts.extend(qualified_parts(rhs, source)?);
+                Some(parts)
+            }),
         "exprParens" => {
             let mut cursor = node.walk();
             let child = node
                 .named_children(&mut cursor)
                 .next()
-                .and_then(|child| leading_identifier(child, source));
+                .and_then(|child| qualified_parts(child, source));
             child
         }
         _ => None,

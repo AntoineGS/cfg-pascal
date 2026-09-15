@@ -238,10 +238,14 @@ end.
     let raise_stmt = block_with_stmt(raise_cfg, &source, "raise", "raise Exception.Create");
     let handler = block_of_kind(raise_cfg, cfg_core::BasicBlockKind::ExceptHandler);
     let after_try = block_with_stmt(raise_cfg, &source, "assignment", "Value := 2");
-    assert_eq!(
-        successors(raise_cfg, raise_stmt),
-        vec![(handler, EdgeKind::ExceptionThrow)],
+    let raise_successors = successors(raise_cfg, raise_stmt);
+    assert!(
+        raise_successors.contains(&(handler, EdgeKind::ExceptionThrow)),
         "raise in an unbraced branch must enter the exception handler"
+    );
+    assert!(
+        raise_successors.contains(&(raise_cfg.exit, EdgeKind::ExceptionThrow)),
+        "without semantic type resolution, the raise must retain an unmatched path"
     );
     assert!(!can_reach(raise_cfg, raise_stmt, after_try));
 }

@@ -257,14 +257,18 @@ end.
     let cfgs = build_file_cfgs(&tree, &source);
     let cfg = cfg_for(&cfgs, "NestedFinallyException");
 
-    let cleanup = block_with_stmt(cfg, &source, "statement", "InnerCleanup");
+    let cleanups = blocks_with_stmt(cfg, &source, "statement", "InnerCleanup");
     let outer_handler = block_of_kind(cfg, BasicBlockKind::BareExceptHandler);
-    assert!(
-        successors(cfg, cleanup)
-            .iter()
-            .all(|(target, kind)| *target == outer_handler && *kind == EdgeKind::ExceptionThrow),
-        "an exception pending through inner finally must reach the outer handler"
-    );
+    assert!(cleanups.len() >= 2);
+    for cleanup in cleanups {
+        assert!(
+            successors(cfg, cleanup)
+                .iter()
+                .all(|(target, kind)| *target == outer_handler
+                    && *kind == EdgeKind::ExceptionThrow),
+            "an exception pending through inner finally must reach the outer handler"
+        );
+    }
 }
 
 #[test]
@@ -348,6 +352,139 @@ end.
     assert!(!can_reach(cfg, second_handler, first_handler));
     assert!(can_reach(cfg, first_handler, after));
     assert!(can_reach(cfg, second_handler, after));
+}
+
+#[test]
+fn exception_constructor_spelling_keeps_base_handler_alternative() {
+    let source = br#"
+unit ExceptionTypeAlternatives;
+interface
+implementation
+
+procedure FunctionRaised;
+begin
+  try
+    raise MakeError();
+  except
+    on E: Exception do
+      HandleFunctionError;
+  end;
+end;
+
+procedure QualifiedSubclassRaised;
+begin
+  try
+    raise EArgumentException.Create('bad');
+  except
+    on E: Exception do
+      HandleSubclassError;
+  end;
+end;
+
+procedure QualifiedBaseRaised;
+begin
+  try
+    raise SysUtils.Exception.Create('bad');
+  except
+    on E: SysUtils.Exception do
+      HandleQualifiedError;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    for (procedure, raise_text, handler_text) in [
+        ("FunctionRaised", "raise MakeError", "HandleFunctionError"),
+        (
+            "QualifiedSubclassRaised",
+            "raise EArgumentException.Create",
+            "HandleSubclassError",
+        ),
+        (
+            "QualifiedBaseRaised",
+            "raise SysUtils.Exception.Create",
+            "HandleQualifiedError",
+        ),
+    ] {
+        let cfg = cfg_for(&cfgs, procedure);
+        let raise_stmt = block_with_stmt(cfg, &source, "raise", raise_text);
+        let handler = block_with_stmt(cfg, &source, "statement", handler_text);
+        assert!(
+            successors(cfg, raise_stmt).contains(&(handler, EdgeKind::ExceptionThrow)),
+            "{raise_text} must retain the typed handler as a conservative alternative"
+        );
+    }
+}
+
+#[test]
+fn exception_constructor_argument_keeps_unknown_handler_alternative() {
+    let source = br#"
+unit ExceptionConstructorArgument;
+interface
+implementation
+
+procedure ConstructorArgument;
+begin
+  try
+    raise EOne.Create(ThrowingValue());
+  except
+    on E: EOne do
+      HandleOne;
+    on E: ETwo do
+      HandleTwo;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ConstructorArgument");
+    let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise EOne.Create");
+    let one_handler = block_with_stmt(cfg, &source, "statement", "HandleOne");
+    let two_handler = block_with_stmt(cfg, &source, "statement", "HandleTwo");
+    let raise_successors = successors(cfg, raise_stmt);
+
+    assert!(raise_successors.contains(&(one_handler, EdgeKind::ExceptionThrow)));
+    assert!(
+        raise_successors.contains(&(two_handler, EdgeKind::ExceptionThrow)),
+        "constructor argument evaluation must retain unknown exception handlers"
+    );
+}
+
+#[test]
+fn exception_constructor_evaluation_enters_finally_as_unknown_transfer() {
+    let source = br#"
+unit ExceptionConstructorFinally;
+interface
+implementation
+
+procedure ConstructorFinally;
+begin
+  try
+    raise EOne.Create(ThrowingValue());
+  finally
+    CleanupConstructor;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ConstructorFinally");
+    let cleanup_blocks = blocks_with_stmt(cfg, &source, "statement", "CleanupConstructor");
+
+    assert!(
+        cleanup_blocks.len() >= 2,
+        "explicit exception and constructor evaluation need distinct pending paths"
+    );
 }
 
 #[test]

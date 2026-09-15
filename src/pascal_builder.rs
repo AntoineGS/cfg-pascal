@@ -5,7 +5,8 @@ use tree_sitter::Node;
 
 use crate::constructs::{
     exit_has_argument, is_break_call, is_continue_call, is_exit_call, node_text,
-    raised_exception_type, Flow, LoopFrame, PendingTransfer, ScopeId, TransferKind,
+    raise_may_throw_during_evaluation, raised_exception_type, Flow, LoopFrame, PendingTransfer,
+    ScopeId, TransferKind,
 };
 
 /// Build CFGs for all procedure/function definitions in a parsed Pascal file.
@@ -461,12 +462,18 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "raise" => {
             let statement_block = prepare_statement_block(ctx, current);
             add_stmt_ref(ctx, statement_block, child);
-            let transfer = raised_exception_type(child, ctx.source)
+            let mut transfers = vec![raised_exception_type(child, ctx.source)
                 .map(|exception_type| {
                     PendingTransfer::exception_with_type(statement_block, exception_type)
                 })
-                .unwrap_or_else(|| PendingTransfer::exception(statement_block));
-            Flow::transfer(transfer)
+                .unwrap_or_else(|| PendingTransfer::exception(statement_block))];
+            if raise_may_throw_during_evaluation(child) {
+                transfers.extend(implicit_exception_transfers(ctx, statement_block));
+            }
+            Flow {
+                normal: None,
+                transfers,
+            }
         }
         "statement" if is_exit_call(child, ctx.source) => {
             let statement_block = prepare_statement_block(ctx, current);
@@ -622,9 +629,9 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
 
 /// Handle a `try..except` block.
 ///
-/// Typed `on` handlers are conservative alternatives for an unknown
-/// exception. A missing catch-all retains an unmatched exception transfer so
-/// an enclosing handler can receive it.
+/// Typed `on` handlers are conservative alternatives because this builder has
+/// no semantic exception hierarchy. A missing catch-all retains an unmatched
+/// exception transfer so an enclosing handler can receive it.
 fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
     let after_block = new_block(ctx, BasicBlockKind::Normal);
 
@@ -641,10 +648,14 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
     let mut exception_sources = Vec::new();
     for transfer in try_flow.transfers {
         if transfer.kind == TransferKind::Exception {
-            if !exception_sources.iter().any(|existing: &PendingTransfer| {
-                existing.source == transfer.source
-                    && existing.exception_type == transfer.exception_type
-            }) {
+            if let Some(existing) = exception_sources
+                .iter_mut()
+                .find(|existing: &&mut PendingTransfer| existing.source == transfer.source)
+            {
+                if existing.exception_type != transfer.exception_type {
+                    existing.exception_type = None;
+                }
+            } else {
                 exception_sources.push(transfer);
             }
         } else {
@@ -656,50 +667,16 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
     let has_catch_all = handlers.iter().any(|handler| handler.catch_all);
 
     for transfer in exception_sources {
-        let known_type = transfer.exception_type.as_deref();
-        let typed_match = known_type.is_some_and(|exception_type| {
-            handlers.iter().any(|handler| {
-                !handler.catch_all
-                    && handler
-                        .exception_type
-                        .as_deref()
-                        .is_some_and(|handler_type| {
-                            handler_type.eq_ignore_ascii_case(exception_type)
-                        })
-            })
-        });
-
-        let mut matched = false;
         for handler in &handlers {
-            let should_dispatch = match known_type {
-                Some(_) if typed_match => {
-                    !handler.catch_all
-                        && handler
-                            .exception_type
-                            .as_deref()
-                            .is_some_and(|handler_type| {
-                                handler_type.eq_ignore_ascii_case(known_type.unwrap_or_default())
-                            })
-                }
-                Some(_) => handler.catch_all,
-                None => true,
-            };
-
-            if should_dispatch {
-                ctx.builder
-                    .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
-                matched = true;
-            }
+            ctx.builder
+                .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
         }
 
-        // Unknown exceptions can match any typed handler, but a typed list is
-        // not a catch-all. Known exceptions propagate only when no matching
-        // typed handler (or catch-all) exists.
-        let unmatched = match known_type {
-            Some(_) => !matched,
-            None => !has_catch_all,
-        };
-        if unmatched {
+        // A syntactic constructor name is not enough to prove that a handler
+        // catches the exception (subclasses and qualified names need semantic
+        // resolution). Keep the outward alternative unless there is a
+        // catch-all handler.
+        if !has_catch_all {
             output.transfers.push(transfer);
         }
     }
@@ -721,7 +698,6 @@ fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -
 struct HandlerFlow {
     entry: BlockId,
     catch_all: bool,
-    exception_type: Option<String>,
     flow: Flow,
 }
 
@@ -734,19 +710,11 @@ fn build_except_handlers(
     let mut handlers = Vec::new();
 
     for child in except_children {
-        let (entry, catch_all, exception_type) = match child.kind() {
-            "exceptionHandler" => (
-                new_block(ctx, BasicBlockKind::ExceptHandler),
-                false,
-                child
-                    .child_by_field_name("exception")
-                    .map(|exception| node_text(exception, ctx.source)),
-            ),
-            "exceptionElse" | "statements" => (
-                new_block(ctx, BasicBlockKind::BareExceptHandler),
-                true,
-                None,
-            ),
+        let (entry, catch_all) = match child.kind() {
+            "exceptionHandler" => (new_block(ctx, BasicBlockKind::ExceptHandler), false),
+            "exceptionElse" | "statements" => {
+                (new_block(ctx, BasicBlockKind::BareExceptHandler), true)
+            }
             _ => continue,
         };
 
@@ -763,7 +731,6 @@ fn build_except_handlers(
         handlers.push(HandlerFlow {
             entry,
             catch_all,
-            exception_type,
             flow,
         });
     }
@@ -773,7 +740,6 @@ fn build_except_handlers(
         handlers.push(HandlerFlow {
             entry,
             catch_all: true,
-            exception_type: None,
             flow: Flow::normal(entry),
         });
     }

@@ -246,7 +246,7 @@ fn build_scope_cfg(
         exception_dispatch_stack: Vec::new(),
         implicit_exception_depth: 0,
         handled_exception_stack: Vec::new(),
-        block_has_stmt: HashSet::new(),
+        block_has_executable_stmt: HashSet::new(),
         label_scopes,
         label_targets: HashMap::new(),
     };
@@ -457,9 +457,11 @@ struct BuildContext<'a> {
     implicit_exception_depth: usize,
     /// Facts for the exception currently handled by each nested handler body.
     handled_exception_stack: Vec<ExceptionTypeFact>,
-    /// Protected statements are split into separate blocks so their
-    /// exceptional edge cannot also cover an earlier unprotected statement.
-    block_has_stmt: HashSet<BlockId>,
+    /// Protected executable statements are split into separate blocks so
+    /// their exceptional edge cannot also cover an earlier unprotected
+    /// statement. Labels do not count as executable statements: consecutive
+    /// labels must all target the statement that follows them.
+    block_has_executable_stmt: HashSet<BlockId>,
     /// Cleanup scopes containing each label, collected before CFG construction
     /// so forward gotos can be routed through finalizers precisely.
     label_scopes: HashMap<String, Vec<ScopeId>>,
@@ -986,7 +988,7 @@ fn process_sequence_child(
 }
 
 fn register_label(ctx: &mut BuildContext<'_>, label: Node, current: BlockId) -> BlockId {
-    let target = if ctx.block_has_stmt.contains(&current) {
+    let target = if ctx.block_has_executable_stmt.contains(&current) {
         let next = new_block(ctx, BasicBlockKind::Normal);
         ctx.builder.add_edge(current, next, EdgeKind::Normal);
         next
@@ -1010,6 +1012,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
     }
 
     match child.kind() {
+        "labeledStatement" | "labeledStatementTr" => walk_labeled_statement(ctx, child, current),
         "block" => walk_block_stmts(ctx, child, current),
         "statements" => walk_statements_node(ctx, child, current),
         "ifElse" => handle_if_else(ctx, child, current),
@@ -1120,6 +1123,33 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
                 transfers: implicit_exception_transfers(ctx, statement_block),
             }
         }
+    }
+}
+
+fn walk_labeled_statement(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let mut cursor = node.walk();
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
+
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "label" {
+            if let Some(block) = current {
+                current = Some(register_label(ctx, child, block));
+            }
+            continue;
+        }
+
+        let Some(block) = current else {
+            continue;
+        };
+        let child_flow = process_single_stmt(ctx, child, block);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
+    }
+
+    Flow {
+        normal: current,
+        transfers,
     }
 }
 
@@ -1775,7 +1805,7 @@ fn label_name_node<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
 /// Use a fresh protected block after an existing statement. Unprotected
 /// straight-line code remains coalesced into the historical body block.
 fn prepare_statement_block(ctx: &mut BuildContext<'_>, current: BlockId) -> BlockId {
-    if ctx.implicit_exception_depth == 0 || !ctx.block_has_stmt.contains(&current) {
+    if ctx.implicit_exception_depth == 0 || !ctx.block_has_executable_stmt.contains(&current) {
         return current;
     }
 
@@ -1811,5 +1841,7 @@ fn add_stmt_ref_span(
             node_kind: node_kind.to_string(),
         },
     );
-    ctx.block_has_stmt.insert(block);
+    if node_kind != "label" {
+        ctx.block_has_executable_stmt.insert(block);
+    }
 }

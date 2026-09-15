@@ -50,7 +50,7 @@ fn blocks_with_stmt(cfg: &Cfg, source: &[u8], kind: &str, text: &str) -> Vec<Blo
 fn blocks_containing_text(cfg: &Cfg, source: &[u8], text: &str) -> Vec<BlockId> {
     cfg.graph
         .node_indices()
-        .filter_map(|index| {
+        .filter(|&index| {
             cfg.graph[index]
                 .stmts
                 .iter()
@@ -58,8 +58,8 @@ fn blocks_containing_text(cfg: &Cfg, source: &[u8], text: &str) -> Vec<BlockId> 
                     std::str::from_utf8(&source[stmt.byte_range.clone()])
                         .is_ok_and(|stmt_text| stmt_text.contains(text))
                 })
-                .then(|| BlockId::from(index))
         })
+        .map(BlockId::from)
         .collect()
 }
 

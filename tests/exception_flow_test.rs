@@ -638,6 +638,15 @@ end.
         })
         .collect();
     assert!(!exit_cleanups.is_empty());
+    assert_eq!(
+        successors(cfg, exit_stmt),
+        exit_cleanups
+            .iter()
+            .copied()
+            .map(|cleanup| (cleanup, EdgeKind::FinallyEntry))
+            .collect::<Vec<_>>(),
+        "Exit must enter mandatory cleanup without a direct bypass"
+    );
     for cleanup in exit_cleanups {
         assert!(!can_reach(cfg, cleanup, after));
     }
@@ -699,6 +708,51 @@ end.
 }
 
 #[test]
+fn loop_continue_unwinds_inner_finally_but_retains_outer_cleanup() {
+    let source = br#"
+unit LoopContinueCleanupScopes;
+interface
+implementation
+
+procedure LoopContinueCleanupScopes;
+begin
+  try
+    while LoopCondition do
+    begin
+      try
+        Continue;
+      finally
+        InnerCleanup;
+      end;
+    end;
+    AfterLoop;
+  finally
+    OuterCleanup;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "LoopContinueCleanupScopes");
+    let condition = block_with_stmt(cfg, &source, "while", "while LoopCondition");
+    let continue_stmt = block_with_stmt(cfg, &source, "statement", "Continue");
+    let inner_cleanup = block_with_stmt(cfg, &source, "statement", "InnerCleanup");
+    let outer_cleanups = blocks_with_stmt(cfg, &source, "statement", "OuterCleanup");
+
+    assert!(successors(cfg, continue_stmt)
+        .iter()
+        .any(|(target, kind)| *target == inner_cleanup && *kind == EdgeKind::FinallyEntry));
+    assert!(successors(cfg, inner_cleanup).contains(&(condition, EdgeKind::FinallyExit)));
+    assert!(successors(cfg, inner_cleanup)
+        .iter()
+        .all(|(target, kind)| !(*kind == EdgeKind::FinallyEntry
+            && outer_cleanups.contains(target))));
+}
+
+#[test]
 fn finalizer_exit_supersedes_pending_exception() {
     let source = br#"
 unit FinalizerOverride;
@@ -730,6 +784,44 @@ end.
             "finalizer Exit must replace the pending exception"
         );
     }
+}
+
+#[test]
+fn finalizer_raise_supersedes_exit_and_reaches_outer_handler() {
+    let source = br#"
+unit FinalizerRaiseOverride;
+interface
+implementation
+
+procedure FinalizerRaiseOverride;
+begin
+  try
+    try
+      Exit;
+    finally
+      raise Error;
+    end;
+  except
+    OuterHandler;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "FinalizerRaiseOverride");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit");
+    let finalizer_raise = block_with_stmt(cfg, &source, "raise", "raise Error");
+    let handler = block_with_stmt(cfg, &source, "statement", "OuterHandler");
+
+    assert!(can_reach(cfg, exit_stmt, handler));
+    assert_eq!(
+        successors(cfg, finalizer_raise),
+        vec![(handler, EdgeKind::ExceptionThrow)],
+        "a finalizer raise must replace Exit and enter the enclosing handler"
+    );
 }
 
 #[test]
@@ -1074,4 +1166,46 @@ end.
             .any(|(_, kind)| *kind == EdgeKind::ExceptionThrow),
         "an exception while evaluating Exit's argument must enter finally"
     );
+}
+
+#[test]
+fn constructor_evaluation_exception_through_finally_reaches_outer_handler() {
+    let source = br#"
+unit ConstructorEvaluationOuterHandler;
+interface
+implementation
+
+procedure ConstructorEvaluationOuterHandler;
+begin
+  try
+    try
+      raise EOne.Create(ThrowingValue());
+    finally
+      InnerCleanup;
+    end;
+  except
+    OuterHandler;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ConstructorEvaluationOuterHandler");
+    let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise EOne.Create");
+    let cleanup_blocks = blocks_with_stmt(cfg, &source, "statement", "InnerCleanup");
+    let handler = block_with_stmt(cfg, &source, "statement", "OuterHandler");
+    let cleanup_targets: HashSet<BlockId> = cleanup_blocks.iter().copied().collect();
+
+    assert!(successors(cfg, raise_stmt).iter().any(|(target, kind)| {
+        cleanup_targets.contains(target) && *kind == EdgeKind::ExceptionThrow
+    }));
+    for cleanup in cleanup_blocks {
+        assert!(
+            successors(cfg, cleanup).contains(&(handler, EdgeKind::ExceptionThrow)),
+            "constructor evaluation exceptions must survive cleanup to the outer handler"
+        );
+    }
 }

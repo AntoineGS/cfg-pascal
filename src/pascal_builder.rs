@@ -449,6 +449,106 @@ fn handle_repeat(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Fl
     }
 }
 
+/// Handle a `case..of` statement.
+fn handle_case(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let selector_block = prepare_statement_block(ctx, current);
+    if let Some(selector) = case_selector(node) {
+        add_stmt_ref_span(
+            ctx,
+            selector_block,
+            node.kind(),
+            node.start_byte()..selector.end_byte(),
+        );
+    }
+    let mut transfers = implicit_exception_transfers(ctx, selector_block);
+    let after_block = new_block(ctx, BasicBlockKind::Normal);
+
+    let mut cursor = node.walk();
+    for arm in node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "caseCase")
+    {
+        let arm_block = new_block(ctx, BasicBlockKind::Normal);
+        ctx.builder
+            .add_edge(selector_block, arm_block, EdgeKind::CaseArm);
+        let arm_flow = walk_field_children(ctx, arm, "body", arm_block, false);
+        if let Some(arm_end) = arm_flow.normal {
+            ctx.builder.add_edge(arm_end, after_block, EdgeKind::Normal);
+        }
+        transfers.extend(arm_flow.transfers);
+    }
+
+    let default_children = case_default_children(node);
+    if default_children.is_empty() {
+        ctx.builder
+            .add_edge(selector_block, after_block, EdgeKind::CaseArm);
+    } else {
+        let default_block = new_block(ctx, BasicBlockKind::Normal);
+        ctx.builder
+            .add_edge(selector_block, default_block, EdgeKind::CaseArm);
+        let default_flow = walk_node_children(ctx, &default_children, default_block);
+        if let Some(default_end) = default_flow.normal {
+            ctx.builder
+                .add_edge(default_end, after_block, EdgeKind::Normal);
+        }
+        transfers.extend(default_flow.transfers);
+    }
+
+    Flow {
+        normal: Some(after_block),
+        transfers,
+    }
+}
+
+fn case_selector<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    let selector = node.named_children(&mut cursor).find(|child| {
+        !matches!(
+            child.kind(),
+            "caseCase" | "kCase" | "kOf" | "kElse" | "kEnd"
+        )
+    });
+    selector
+}
+
+fn case_default_children<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
+    let mut cursor = node.walk();
+    let mut after_else = false;
+    let mut children = Vec::new();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "kElse" {
+            after_else = true;
+            continue;
+        }
+        if after_else && child.kind() != "kEnd" {
+            children.push(child);
+        }
+    }
+    children
+}
+
+fn walk_node_children(ctx: &mut BuildContext<'_>, children: &[Node<'_>], current: BlockId) -> Flow {
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
+
+    for &child in children {
+        if child.kind() == ";" {
+            continue;
+        }
+        let Some(normal) = current else {
+            break;
+        };
+        let child_flow = process_single_stmt(ctx, child, normal);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
+    }
+
+    Flow {
+        normal: current,
+        transfers,
+    }
+}
+
 /// Process a single statement node in any syntactic context.
 fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId) -> Flow {
     if child.is_extra() {
@@ -461,6 +561,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "ifElse" => handle_if_else(ctx, child, current),
         "if" => handle_if_only(ctx, child, current),
         "for" | "while" => handle_for_or_while(ctx, child, current),
+        "case" => handle_case(ctx, child, current),
         "repeat" => handle_repeat(ctx, child, current),
         "try" => handle_try(ctx, child, current),
         "raise" => {

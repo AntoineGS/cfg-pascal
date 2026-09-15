@@ -1102,7 +1102,7 @@ fn case_default_children<'tree>(node: Node<'tree>) -> Option<Vec<Node<'tree>>> {
             after_else = true;
             continue;
         }
-        if after_else && child.kind() != "kEnd" {
+        if after_else && !matches!(child.kind(), "kEnd" | ":" | ";" | ",") {
             children.push(child);
         }
     }

@@ -262,6 +262,65 @@ end.
 }
 
 #[test]
+fn empty_colon_after_otherwise_is_not_an_executable_case_statement() {
+    let source = br#"
+unit CaseOtherwiseColon;
+interface
+implementation
+
+procedure CaseOtherwiseColon;
+begin
+  try
+    case Choice of
+      otherwise:
+    end;
+  except
+    HandleCase;
+  end;
+  AfterCase;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "CaseOtherwiseColon");
+    let selector = block_with_stmt(cfg, &source, "case", "case Choice");
+    let handler = block_with_stmt(cfg, &source, "statement", "HandleCase");
+    let after_case = block_with_stmt(cfg, &source, "statement", "AfterCase");
+
+    assert!(
+        cfg.graph
+            .node_indices()
+            .flat_map(|index| cfg.graph[index].stmts.iter())
+            .all(|stmt| stmt.node_kind != ":"),
+        "the optional colon after otherwise is punctuation, not an executable statement"
+    );
+
+    let default_arm = successors(cfg, selector)
+        .into_iter()
+        .find_map(|(target, kind)| (kind == EdgeKind::CaseArm).then_some(target))
+        .expect("otherwise must still create a default case arm when its body is empty");
+    assert!(can_reach(cfg, default_arm, after_case));
+
+    let handler_edges: Vec<_> = cfg
+        .graph
+        .edge_indices()
+        .filter_map(|edge| {
+            let (source, target) = cfg.graph.edge_endpoints(edge)?;
+            (target == handler.index() && cfg.graph[edge] == EdgeKind::ExceptionThrow)
+                .then_some(BlockId::from(source))
+        })
+        .collect();
+    assert_eq!(
+        handler_edges,
+        vec![selector],
+        "only evaluating the case selector should have an exception edge to the handler"
+    );
+}
+
+#[test]
 fn preprocessor_statement_blocks_are_alternatives_and_can_skip() {
     let source = br#"
 unit ConditionalStatements;

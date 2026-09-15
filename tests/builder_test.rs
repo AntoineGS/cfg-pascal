@@ -177,6 +177,21 @@ fn all_four_procs_found() {
 }
 
 #[test]
+fn matching_partial_parser_snapshots_build_without_panicking() {
+    let snippets = [
+        "procedure P;\nbegin\n  try\n    raise E.Create;\n  except\n    on E do\n",
+        "unit U;\ninterface\nimplementation\n{$IFDEF X}\ntype\n  E = class\n",
+    ];
+
+    for source in snippets {
+        let source = source.as_bytes();
+        let tree = parse(source);
+        assert!(tree.root_node().has_error(), "fixture should be partial");
+        let _cfgs = build_file_cfgs(&tree, source);
+    }
+}
+
+#[test]
 fn for_loop_has_back_edge() {
     let source = load_fixture("loops.pas");
     let tree = parse(&source);

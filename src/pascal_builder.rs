@@ -557,11 +557,48 @@ enum FinalizerInput {
     Transfer(PendingTransfer),
 }
 
+/// Semantic identity of a continuation entering a finalizer. The source block
+/// is deliberately absent: equivalent continuations can share one cleanup
+/// body without introducing cross-path edges.
+#[derive(Debug, PartialEq, Eq)]
+enum FinalizerKey {
+    Normal,
+    Transfer {
+        kind: TransferKind,
+        target: Option<BlockId>,
+        target_scopes: Vec<ScopeId>,
+        exception_type: Option<String>,
+    },
+}
+
+impl FinalizerKey {
+    fn from_input(input: &FinalizerInput) -> Self {
+        match input {
+            FinalizerInput::Normal(_) => Self::Normal,
+            FinalizerInput::Transfer(transfer) => Self::Transfer {
+                kind: transfer.kind,
+                target: transfer.target,
+                target_scopes: transfer.target_scopes.clone(),
+                exception_type: transfer
+                    .exception_type
+                    .as_ref()
+                    .map(|exception_type| exception_type.to_ascii_lowercase()),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FinalizerGroup {
+    key: FinalizerKey,
+    inputs: Vec<FinalizerInput>,
+}
+
 /// Handle a `try..finally` block.
 ///
-/// Every incoming continuation gets its own finalizer entry/body. Sharing a
-/// single finalizer block would create cross-path edges: a `Break` could leave
-/// through a finalizer instance belonging to `Continue`, for example.
+/// Incoming continuations share a finalizer body only when their semantic
+/// pending transfer is equivalent. Distinct normal, return, loop-target, and
+/// exception continuations retain separate cleanup paths.
 fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
     let scope_id = ctx.next_scope_id;
     ctx.next_scope_id += 1;
@@ -580,6 +617,7 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
     inputs.extend(try_flow.transfers.into_iter().map(FinalizerInput::Transfer));
 
     let mut output = Flow::default();
+    let mut groups = Vec::new();
     for input in inputs {
         if let FinalizerInput::Transfer(transfer) = &input {
             if !transfer.leaves_scope(scope_id) {
@@ -588,44 +626,66 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
             }
         }
 
-        let (source, entry_edge) = match &input {
-            FinalizerInput::Normal(source) => (*source, EdgeKind::FinallyEntry),
-            FinalizerInput::Transfer(transfer) => (
-                transfer.source,
-                if transfer.kind == TransferKind::Exception {
-                    EdgeKind::ExceptionThrow
-                } else {
-                    EdgeKind::FinallyEntry
-                },
-            ),
-        };
+        let key = FinalizerKey::from_input(&input);
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group: &&mut FinalizerGroup| group.key == key)
+        {
+            group.inputs.push(input);
+        } else {
+            groups.push(FinalizerGroup {
+                key,
+                inputs: vec![input],
+            });
+        }
+    }
 
+    for group in groups {
+        let is_normal = matches!(group.key, FinalizerKey::Normal);
         let finally_block = new_block(ctx, BasicBlockKind::FinallyHandler);
-        ctx.builder.add_edge(source, finally_block, entry_edge);
+        for input in &group.inputs {
+            let (source, entry_edge) = match input {
+                FinalizerInput::Normal(source) => (*source, EdgeKind::FinallyEntry),
+                FinalizerInput::Transfer(transfer) => (
+                    transfer.source,
+                    if transfer.kind == TransferKind::Exception {
+                        EdgeKind::ExceptionThrow
+                    } else {
+                        EdgeKind::FinallyEntry
+                    },
+                ),
+            };
+            ctx.builder.add_edge(source, finally_block, entry_edge);
+        }
 
         ctx.implicit_exception_depth += 1;
         let finally_flow = walk_finally_body(ctx, node, finally_block);
         ctx.implicit_exception_depth -= 1;
 
         if let Some(finally_end) = finally_flow.normal {
-            match input {
-                FinalizerInput::Normal(_) => {
-                    ctx.builder
-                        .add_edge(finally_end, after_block, EdgeKind::FinallyExit);
-                    output.normal = Some(after_block);
-                }
-                FinalizerInput::Transfer(transfer) => {
-                    // The finalizer completed normally, so the original
-                    // transfer remains pending for outer cleanup scopes.
-                    output.transfers.push(transfer.with_source(finally_end));
-                }
+            if is_normal {
+                ctx.builder
+                    .add_edge(finally_end, after_block, EdgeKind::FinallyExit);
+                output.normal = Some(after_block);
+            } else if let Some(transfer) = group.inputs.iter().find_map(|input| match input {
+                FinalizerInput::Transfer(transfer) => Some(transfer),
+                FinalizerInput::Normal(_) => None,
+            }) {
+                // The finalizer completed normally, so the original transfer
+                // remains pending for outer cleanup scopes.
+                output.transfers.push(transfer.with_source(finally_end));
             }
         }
 
         // Any transfer produced by the finalizer itself supersedes the
-        // incoming transfer. It is already sourced in the finalizer clone and
-        // is routed by an enclosing cleanup scope (or the procedure boundary).
-        output.transfers.extend(finally_flow.transfers);
+        // incoming transfer. Mark it as finalizer-sourced before routing it
+        // through an enclosing cleanup scope (or the procedure boundary).
+        output.transfers.extend(
+            finally_flow
+                .transfers
+                .iter()
+                .map(|transfer| transfer.with_source(transfer.source)),
+        );
     }
 
     output

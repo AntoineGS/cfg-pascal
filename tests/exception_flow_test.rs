@@ -47,6 +47,22 @@ fn blocks_with_stmt(cfg: &Cfg, source: &[u8], kind: &str, text: &str) -> Vec<Blo
         .collect()
 }
 
+fn blocks_containing_text(cfg: &Cfg, source: &[u8], text: &str) -> Vec<BlockId> {
+    cfg.graph
+        .node_indices()
+        .filter_map(|index| {
+            cfg.graph[index]
+                .stmts
+                .iter()
+                .any(|stmt| {
+                    std::str::from_utf8(&source[stmt.byte_range.clone()])
+                        .is_ok_and(|stmt_text| stmt_text.contains(text))
+                })
+                .then(|| BlockId::from(index))
+        })
+        .collect()
+}
+
 fn block_with_stmt(cfg: &Cfg, source: &[u8], kind: &str, text: &str) -> BlockId {
     let blocks = blocks_with_stmt(cfg, source, kind, text);
     assert_eq!(
@@ -521,6 +537,243 @@ end.
         blocks_with_stmt(cfg, &source, "comment", "this comment").is_empty(),
         "comments must not become executable statement references"
     );
+}
+
+#[test]
+fn deeply_nested_finalizers_have_bounded_cfg_size() {
+    const DEPTH: usize = 16;
+    let mut source = String::from(
+        "unit DeepFinalizers;\ninterface\nimplementation\n\nprocedure DeepFinalizers;\nbegin\n",
+    );
+
+    for _ in 0..DEPTH {
+        source.push_str("  try\n");
+    }
+    source.push_str("    Work;\n");
+    for index in (0..DEPTH).rev() {
+        source.push_str(&format!("  finally\n    Cleanup{index};\n  end;\n"));
+    }
+    source.push_str("end;\n\nend.\n");
+
+    let tree = parse_clean(source.as_bytes());
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "DeepFinalizers");
+
+    assert!(
+        cfg.graph.node_count() < 1_000,
+        "nested finalizers should share equivalent cleanup paths, got {} blocks",
+        cfg.graph.node_count()
+    );
+}
+
+#[test]
+fn mixed_normal_and_exit_paths_do_not_cross_shared_finalizers() {
+    let source = br#"
+unit MixedFinalizerPaths;
+interface
+implementation
+
+procedure MixedFinalizerPaths;
+begin
+  try
+    if ChoosePath then
+      Exit
+    else
+      WorkPath;
+  finally
+    CleanupPath;
+  end;
+  AfterPath;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "MixedFinalizerPaths");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit");
+    let after = block_with_stmt(cfg, &source, "statement", "AfterPath");
+    let cleanups = blocks_with_stmt(cfg, &source, "statement", "CleanupPath");
+    assert!(cleanups.len() >= 2);
+
+    let normal_cleanup = cleanups
+        .iter()
+        .copied()
+        .find(|cleanup| can_reach(cfg, *cleanup, after))
+        .expect("normal completion must retain its finalizer path");
+    assert!(!can_reach(cfg, exit_stmt, normal_cleanup));
+
+    let exit_cleanups: Vec<BlockId> = successors(cfg, exit_stmt)
+        .into_iter()
+        .filter_map(|(target, kind)| {
+            (kind == EdgeKind::FinallyEntry && cleanups.contains(&target)).then_some(target)
+        })
+        .collect();
+    assert!(!exit_cleanups.is_empty());
+    for cleanup in exit_cleanups {
+        assert!(!can_reach(cfg, cleanup, after));
+    }
+}
+
+#[test]
+fn loop_break_unwinds_inner_finally_but_retains_outer_cleanup() {
+    let source = br#"
+unit LoopCleanupScopes;
+interface
+implementation
+
+procedure LoopCleanupScopes;
+begin
+  try
+    while LoopCondition do
+    begin
+      try
+        Break;
+      finally
+        InnerCleanup;
+      end;
+    end;
+    AfterLoop;
+  finally
+    OuterCleanup;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "LoopCleanupScopes");
+    let condition = block_with_stmt(cfg, &source, "while", "while LoopCondition");
+    let after_loop = successors(cfg, condition)
+        .into_iter()
+        .find_map(|(target, kind)| (kind == EdgeKind::LoopExit).then_some(target))
+        .expect("while condition must have a loop-exit target");
+    let break_stmt = block_with_stmt(cfg, &source, "statement", "Break");
+    let inner_cleanup = block_with_stmt(cfg, &source, "statement", "InnerCleanup");
+    let outer_cleanups = blocks_with_stmt(cfg, &source, "statement", "OuterCleanup");
+
+    assert!(
+        successors(cfg, inner_cleanup).contains(&(after_loop, EdgeKind::FinallyExit)),
+        "Break must leave the inner finalizer at the loop target"
+    );
+    assert!(successors(cfg, break_stmt)
+        .iter()
+        .any(|(target, kind)| *target == inner_cleanup && *kind == EdgeKind::FinallyEntry));
+    assert!(
+        successors(cfg, inner_cleanup)
+            .iter()
+            .all(|(target, kind)| !(*kind == EdgeKind::FinallyEntry
+                && outer_cleanups.contains(target))),
+        "the Break target remains inside the outer cleanup scope"
+    );
+}
+
+#[test]
+fn finalizer_exit_supersedes_pending_exception() {
+    let source = br#"
+unit FinalizerOverride;
+interface
+implementation
+
+procedure FinalizerOverride;
+begin
+  try
+    raise EOne;
+  finally
+    Exit;
+  end;
+  AfterUnreachable;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "FinalizerOverride");
+    let finalizer_exits = blocks_with_stmt(cfg, &source, "statement", "Exit");
+    assert!(!finalizer_exits.is_empty());
+    for exit in finalizer_exits {
+        assert_eq!(
+            successors(cfg, exit),
+            vec![(cfg.exit, EdgeKind::FinallyExit)],
+            "finalizer Exit must replace the pending exception"
+        );
+    }
+}
+
+#[test]
+fn for_and_repeat_protected_conditions_have_precise_sources() {
+    let source = br#"
+unit ProtectedLoopSources;
+interface
+implementation
+
+procedure ForProtected;
+var I: Integer;
+begin
+  try
+    for I := ForStartCall() to ForEndCall() do
+      ForBodyCall();
+  except
+    HandleFor;
+  end;
+end;
+
+procedure RepeatProtected;
+begin
+  try
+    repeat
+      RepeatBodyCall();
+    until RepeatConditionCall();
+  except
+    HandleRepeat;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let for_cfg = cfg_for(&cfgs, "ForProtected");
+    let for_handler = block_with_stmt(for_cfg, &source, "statement", "HandleFor");
+    let for_condition = block_with_stmt(for_cfg, &source, "for", "for I := ForStartCall");
+    let for_body = block_with_stmt(for_cfg, &source, "statement", "ForBodyCall");
+    assert!(successors(for_cfg, for_condition).contains(&(for_handler, EdgeKind::ExceptionThrow)));
+    assert!(successors(for_cfg, for_body).contains(&(for_handler, EdgeKind::ExceptionThrow)));
+    let for_header_text = for_cfg.graph[for_condition.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "for")
+        .map(|stmt| std::str::from_utf8(&source[stmt.byte_range.clone()]).unwrap())
+        .expect("for header statement reference");
+    assert!(!for_header_text.contains("ForBodyCall"));
+
+    let repeat_cfg = cfg_for(&cfgs, "RepeatProtected");
+    let repeat_handler = block_with_stmt(repeat_cfg, &source, "statement", "HandleRepeat");
+    let repeat_body = block_with_stmt(repeat_cfg, &source, "statement", "RepeatBodyCall");
+    let repeat_condition = blocks_containing_text(repeat_cfg, &source, "RepeatConditionCall");
+    assert_eq!(repeat_condition.len(), 1);
+    let repeat_condition = repeat_condition[0];
+    assert!(successors(repeat_cfg, repeat_condition)
+        .contains(&(repeat_handler, EdgeKind::ExceptionThrow)));
+    assert!(
+        successors(repeat_cfg, repeat_body).contains(&(repeat_handler, EdgeKind::ExceptionThrow))
+    );
+    let repeat_condition_texts: Vec<&str> = repeat_cfg.graph[repeat_condition.index()]
+        .stmts
+        .iter()
+        .filter_map(|stmt| std::str::from_utf8(&source[stmt.byte_range.clone()]).ok())
+        .filter(|text| text.contains("RepeatConditionCall"))
+        .collect();
+    assert!(repeat_condition_texts
+        .iter()
+        .all(|text| !text.contains("RepeatBodyCall")));
 }
 
 #[test]

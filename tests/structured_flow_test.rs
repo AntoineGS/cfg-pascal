@@ -387,6 +387,17 @@ begin
   AfterLoop;
 end;
 
+procedure ConditionalLabel;
+label Done;
+begin
+  {$IFDEF FIRST}
+  Done: BranchWork;
+  {$ELSE}
+  OtherBranch;
+  {$ENDIF}
+  goto Done;
+end;
+
 procedure ConditionalGotoFinally;
 label Done;
 begin
@@ -424,6 +435,14 @@ end.
     assert_eq!(
         successors(loop_cfg, break_stmt),
         vec![(after_loop, EdgeKind::Normal)]
+    );
+
+    let label_cfg = cfg_for(&cfgs, "ConditionalLabel");
+    let conditional_label = block_with_stmt(label_cfg, &source, "label", "Done:");
+    let conditional_goto = block_with_stmt(label_cfg, &source, "goto", "goto Done");
+    assert_eq!(
+        successors(label_cfg, conditional_goto),
+        vec![(conditional_label, EdgeKind::Goto)]
     );
 
     let goto_cfg = cfg_for(&cfgs, "ConditionalGotoFinally");

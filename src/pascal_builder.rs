@@ -197,6 +197,13 @@ enum ScopeBody {
 }
 
 type PreprocessorBranchKey = (usize, usize, usize);
+type PreprocessorGroupId = usize;
+
+#[derive(Debug, Clone, Copy)]
+struct PreprocessorBranchInfo {
+    group: PreprocessorGroupId,
+    index: usize,
+}
 
 fn build_scope_cfg(
     scope_name: String,
@@ -222,11 +229,24 @@ fn build_scope_cfg(
         scope_ids,
         label_scopes,
         preprocessor_branch_bindings,
+        preprocessor_branch_info,
         label_binding_parents,
         next_label_binding,
         ..
     } = label_prepass;
     let preprocessor_label_bindings = preprocessor_branch_bindings.values().copied().collect();
+    let preprocessor_branch_keys = preprocessor_branch_bindings
+        .iter()
+        .map(|(key, binding)| (*binding, *key))
+        .collect();
+    let preprocessor_binding_sources = preprocessor_branch_bindings
+        .values()
+        .map(|binding| (*binding, *binding))
+        .collect();
+    let preprocessor_runtime_bindings = preprocessor_branch_bindings
+        .iter()
+        .map(|(key, binding)| ((0, *key), *binding))
+        .collect();
 
     let mut ctx = BuildContext {
         builder: &mut builder,
@@ -251,6 +271,10 @@ fn build_scope_cfg(
         block_has_executable_stmt: HashSet::new(),
         label_scopes,
         preprocessor_branch_bindings,
+        preprocessor_branch_info,
+        preprocessor_branch_keys,
+        preprocessor_binding_sources,
+        preprocessor_runtime_bindings,
         preprocessor_label_bindings,
         label_targets: HashMap::new(),
     };
@@ -270,6 +294,8 @@ struct LabelScopePrepass<'a> {
     scope_ids: HashMap<(usize, usize), ScopeId>,
     label_scopes: HashMap<(LabelBindingId, String), Vec<ScopeId>>,
     preprocessor_branch_bindings: HashMap<PreprocessorBranchKey, LabelBindingId>,
+    preprocessor_branch_info: HashMap<LabelBindingId, PreprocessorBranchInfo>,
+    next_preprocessor_group: PreprocessorGroupId,
     label_binding_parents: Vec<Option<LabelBindingId>>,
     next_label_binding: LabelBindingId,
 }
@@ -282,6 +308,8 @@ impl<'a> LabelScopePrepass<'a> {
             scope_ids: HashMap::new(),
             label_scopes: HashMap::new(),
             preprocessor_branch_bindings: HashMap::new(),
+            preprocessor_branch_info: HashMap::new(),
+            next_preprocessor_group: 0,
             label_binding_parents: vec![None],
             next_label_binding: 1,
         }
@@ -303,12 +331,16 @@ impl<'a> LabelScopePrepass<'a> {
                 return;
             }
 
+            let group = self.next_preprocessor_group;
+            self.next_preprocessor_group += 1;
             for (index, branch) in branches.into_iter().enumerate() {
                 let branch_binding = self.next_label_binding;
                 self.next_label_binding += 1;
                 self.label_binding_parents.push(Some(current_label_binding));
                 self.preprocessor_branch_bindings
                     .insert((node.start_byte(), node.end_byte(), index), branch_binding);
+                self.preprocessor_branch_info
+                    .insert(branch_binding, PreprocessorBranchInfo { group, index });
 
                 for child in branch {
                     self.collect(child, active_scopes, branch_binding);
@@ -506,6 +538,18 @@ struct BuildContext<'a> {
     /// Stable label namespaces assigned to preprocessor branches during the
     /// prepass. Runtime walks use the same IDs when routing branch-local gotos.
     preprocessor_branch_bindings: HashMap<PreprocessorBranchKey, LabelBindingId>,
+    /// Syntactic alternative-group and branch metadata for each prepass
+    /// namespace. Branches in one group are mutually exclusive; independent
+    /// groups remain compatible label targets.
+    preprocessor_branch_info: HashMap<LabelBindingId, PreprocessorBranchInfo>,
+    /// Reverse lookup from a prepass namespace to its syntax node and branch.
+    preprocessor_branch_keys: HashMap<LabelBindingId, PreprocessorBranchKey>,
+    /// Static preprocessor namespaces and runtime clone namespaces both point
+    /// to the prepass namespace they represent.
+    preprocessor_binding_sources: HashMap<LabelBindingId, LabelBindingId>,
+    /// Runtime namespace for one preprocessor branch, keyed by its containing
+    /// finalizer walk and syntactic branch key. The root walk uses instance 0.
+    preprocessor_runtime_bindings: HashMap<(LabelBindingId, PreprocessorBranchKey), LabelBindingId>,
     /// Runtime branch namespaces, including fresh copies created while walking
     /// a cloned finalizer whose lexical parent differs from the prepass.
     preprocessor_label_bindings: HashSet<LabelBindingId>,
@@ -582,22 +626,7 @@ fn label_target_bindings(
     ctx: &BuildContext<'_>,
     label: &str,
 ) -> Vec<(LabelBindingId, Vec<ScopeId>)> {
-    let current = ctx.current_label_binding;
-
-    // A cloned finalizer gets a runtime-only namespace. Prefer a label in that
-    // clone when the prepass found the corresponding declaration in one of its
-    // lexical ancestors; resolve_label_target still falls back outward when the
-    // label belongs to an enclosing namespace instead.
-    if current != 0 && !is_preprocessor_binding(ctx, current) {
-        if let Some(scopes) = nearest_label_scopes(ctx, current, label) {
-            return vec![(current, scopes)];
-        }
-        if let Some(parent) = parent_label_binding(ctx, current) {
-            return label_target_bindings_from_namespace(ctx, parent, label);
-        }
-    }
-
-    label_target_bindings_from_namespace(ctx, current, label)
+    label_target_bindings_from_namespace(ctx, ctx.current_label_binding, label)
 }
 
 fn label_target_bindings_from_namespace(
@@ -613,33 +642,31 @@ fn label_target_bindings_from_namespace(
         binding = parent_label_binding(ctx, candidate);
     }
 
-    (0..ctx.label_binding_parents.len())
-        .filter(|candidate| {
-            is_preprocessor_binding(ctx, *candidate)
-                && is_descendant_label_binding(ctx, *candidate, start)
-        })
-        .filter_map(|candidate| {
-            ctx.label_scopes
-                .get(&(candidate, label.to_string()))
-                .cloned()
-                .map(|scopes| (candidate, scopes))
-        })
-        .collect()
-}
+    let source_path = preprocessor_path(ctx, start);
+    let instance = label_namespace_instance(ctx, start);
+    let mut targets = Vec::new();
 
-fn nearest_label_scopes(
-    ctx: &BuildContext<'_>,
-    start: LabelBindingId,
-    label: &str,
-) -> Option<Vec<ScopeId>> {
-    let mut binding = Some(start);
-    while let Some(candidate) = binding {
-        if let Some(scopes) = ctx.label_scopes.get(&(candidate, label.to_string())) {
-            return Some(scopes.clone());
+    for &prepass_binding in ctx.preprocessor_branch_info.keys() {
+        let Some(scopes) = ctx
+            .label_scopes
+            .get(&(prepass_binding, label.to_string()))
+            .cloned()
+        else {
+            continue;
+        };
+        let target_path = preprocessor_path(ctx, prepass_binding);
+        if !compatible_preprocessor_paths(&source_path, &target_path) {
+            continue;
         }
-        binding = parent_label_binding(ctx, candidate);
+        let Some(runtime_binding) = runtime_target_binding(ctx, start, instance, prepass_binding)
+        else {
+            continue;
+        };
+        targets.push((runtime_binding, scopes));
     }
-    None
+
+    targets.sort_by_key(|(binding, _)| *binding);
+    targets
 }
 
 fn parent_label_binding(ctx: &BuildContext<'_>, binding: LabelBindingId) -> Option<LabelBindingId> {
@@ -650,19 +677,75 @@ fn is_preprocessor_binding(ctx: &BuildContext<'_>, binding: LabelBindingId) -> b
     ctx.preprocessor_label_bindings.contains(&binding)
 }
 
-fn is_descendant_label_binding(
-    ctx: &BuildContext<'_>,
-    binding: LabelBindingId,
-    ancestor: LabelBindingId,
-) -> bool {
+fn label_namespace_instance(ctx: &BuildContext<'_>, binding: LabelBindingId) -> LabelBindingId {
     let mut current = binding;
-    while current != ancestor {
+    while current != 0 && is_preprocessor_binding(ctx, current) {
         let Some(parent) = parent_label_binding(ctx, current) else {
-            return false;
+            break;
         };
         current = parent;
     }
-    binding != ancestor
+    current
+}
+
+fn preprocessor_path(
+    ctx: &BuildContext<'_>,
+    start: LabelBindingId,
+) -> Vec<(PreprocessorGroupId, usize)> {
+    let mut path = Vec::new();
+    let mut binding = Some(start);
+    while let Some(candidate) = binding {
+        if let Some(source) = ctx.preprocessor_binding_sources.get(&candidate) {
+            if let Some(info) = ctx.preprocessor_branch_info.get(source) {
+                path.push((info.group, info.index));
+            }
+        }
+        binding = parent_label_binding(ctx, candidate);
+    }
+    path
+}
+
+fn compatible_preprocessor_paths(
+    source: &[(PreprocessorGroupId, usize)],
+    target: &[(PreprocessorGroupId, usize)],
+) -> bool {
+    source.iter().all(|(source_group, source_index)| {
+        match target
+            .iter()
+            .find(|(target_group, _)| target_group == source_group)
+        {
+            None => true,
+            Some((_, target_index)) => target_index == source_index,
+        }
+    })
+}
+
+fn runtime_target_binding(
+    ctx: &BuildContext<'_>,
+    start: LabelBindingId,
+    instance: LabelBindingId,
+    prepass_binding: LabelBindingId,
+) -> Option<LabelBindingId> {
+    if instance == 0 {
+        return Some(prepass_binding);
+    }
+
+    let mut binding = Some(start);
+    while let Some(candidate) = binding {
+        if ctx
+            .preprocessor_binding_sources
+            .get(&candidate)
+            .is_some_and(|source| *source == prepass_binding)
+        {
+            return Some(candidate);
+        }
+        binding = parent_label_binding(ctx, candidate);
+    }
+
+    let key = ctx.preprocessor_branch_keys.get(&prepass_binding)?;
+    ctx.preprocessor_runtime_bindings
+        .get(&(instance, *key))
+        .copied()
 }
 
 fn runtime_preprocessor_binding(
@@ -670,14 +753,23 @@ fn runtime_preprocessor_binding(
     prepass_binding: LabelBindingId,
     parent_binding: LabelBindingId,
 ) -> LabelBindingId {
-    if parent_label_binding(ctx, prepass_binding) == Some(parent_binding) {
-        return prepass_binding;
+    let key = *ctx
+        .preprocessor_branch_keys
+        .get(&prepass_binding)
+        .expect("preprocessor branch key missing from prepass");
+    let instance = label_namespace_instance(ctx, parent_binding);
+    if let Some(runtime_binding) = ctx.preprocessor_runtime_bindings.get(&(instance, key)) {
+        return *runtime_binding;
     }
 
     let runtime_binding = ctx.next_label_binding;
     ctx.next_label_binding += 1;
     ctx.label_binding_parents.push(Some(parent_binding));
     ctx.preprocessor_label_bindings.insert(runtime_binding);
+    ctx.preprocessor_binding_sources
+        .insert(runtime_binding, prepass_binding);
+    ctx.preprocessor_runtime_bindings
+        .insert((instance, key), runtime_binding);
 
     let branch_scopes: Vec<_> = ctx
         .label_scopes
@@ -691,6 +783,65 @@ fn runtime_preprocessor_binding(
     }
 
     runtime_binding
+}
+
+fn prepare_finalizer_preprocessor_bindings(
+    ctx: &mut BuildContext<'_>,
+    try_node: Node,
+    current: LabelBindingId,
+) {
+    let Some(body) = field_children(try_node, "finally")
+        .into_iter()
+        .find(|child| child.kind() == "statements")
+    else {
+        return;
+    };
+    prepare_preprocessor_bindings_in_node(ctx, body, current);
+}
+
+fn prepare_preprocessor_bindings_in_node(
+    ctx: &mut BuildContext<'_>,
+    node: Node,
+    current: LabelBindingId,
+) {
+    if node.kind() == "defProc" {
+        return;
+    }
+
+    if node.kind() == "ppBlock" {
+        let (branches, has_else) = preprocessor_branches(node, ctx.source);
+        if branches.iter().all(Vec::is_empty) && !has_else {
+            return;
+        }
+
+        for (index, branch) in branches.into_iter().enumerate() {
+            let prepass_binding = ctx
+                .preprocessor_branch_bindings
+                .get(&(node.start_byte(), node.end_byte(), index))
+                .copied()
+                .expect("preprocessor branch label namespace missing from prepass");
+            let branch_binding = runtime_preprocessor_binding(ctx, prepass_binding, current);
+            for child in branch {
+                prepare_preprocessor_bindings_in_node(ctx, child, branch_binding);
+            }
+        }
+        return;
+    }
+
+    if node.kind() == "try" && try_has_finally(node) {
+        for child in field_children(node, "try") {
+            prepare_preprocessor_bindings_in_node(ctx, child, current);
+        }
+        for child in field_children(node, "except") {
+            prepare_preprocessor_bindings_in_node(ctx, child, current);
+        }
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        prepare_preprocessor_bindings_in_node(ctx, child, current);
+    }
 }
 
 fn copy_visible_label_scopes(
@@ -1791,6 +1942,7 @@ fn walk_or_reuse_finally_body(
     ctx.label_binding_parents.push(Some(previous_label_binding));
     copy_visible_label_scopes(ctx, previous_label_binding, label_binding);
     ctx.current_label_binding = label_binding;
+    prepare_finalizer_preprocessor_bindings(ctx, node, label_binding);
     let previous_finalizer_continuation = ctx.active_finalizer_continuation;
     let previous_suspended_transfer = ctx.active_finalizer_suspended_transfer.clone();
     ctx.active_finalizer_continuation = Some(continuation_id);

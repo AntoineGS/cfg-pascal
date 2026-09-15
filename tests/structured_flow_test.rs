@@ -570,6 +570,48 @@ end.
 }
 
 #[test]
+fn preprocessor_goto_can_target_labels_in_a_separate_conditional_block() {
+    let source = br#"
+unit SeparateConditionalLabels;
+interface
+implementation
+
+procedure SeparateConditionalLabels;
+label Done;
+begin
+  {$IFDEF A}
+  goto Done;
+  {$ENDIF}
+  {$IFDEF B}
+  Done: First;
+  {$ELSE}
+  Done: Second;
+  {$ENDIF}
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "SeparateConditionalLabels");
+    let goto_block = block_with_stmt(cfg, &source, "goto", "goto Done");
+    let labels = blocks_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(labels.len(), 2);
+
+    let targets: HashSet<_> = successors(cfg, goto_block)
+        .into_iter()
+        .filter_map(|(target, kind)| (kind == EdgeKind::Goto).then_some(target))
+        .collect();
+    assert_eq!(
+        targets,
+        labels.into_iter().collect(),
+        "a goto in one conditional block must retain labels from a separate feasible block"
+    );
+}
+
+#[test]
 fn preprocessor_labels_inside_cloned_finalizers_keep_their_local_binding() {
     let source = br#"
 unit ConditionalFinalizerLabels;
@@ -616,6 +658,140 @@ end.
             "a preprocessor-branch goto inside a finalizer must resolve a finalizer-local label"
         );
     }
+}
+
+#[test]
+fn preprocessor_labels_in_each_finalizer_clone_keep_forward_targets_local() {
+    let source = br#"
+unit ForwardConditionalFinalizerLabels;
+interface
+implementation
+
+procedure ForwardConditionalFinalizerLabels;
+label Done;
+begin
+  try
+    if Flag then Exit;
+  finally
+    goto Done;
+    {$IFDEF A}
+    Done: CleanupA;
+    {$ELSE}
+    Done: CleanupB;
+    {$ENDIF}
+    Tail;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ForwardConditionalFinalizerLabels");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+    let labels = blocks_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(gotos.len(), 3);
+    assert_eq!(labels.len(), 6);
+
+    let expected_pairs: Vec<Vec<BlockId>> =
+        labels.chunks_exact(2).map(|pair| pair.to_vec()).collect();
+    let mut actual_pairs = Vec::new();
+    for goto in gotos {
+        let edges = successors(cfg, goto);
+        assert_eq!(
+            edges.len(),
+            2,
+            "each clone must resolve both feasible labels"
+        );
+        assert!(
+            edges.iter().all(|(_, kind)| *kind == EdgeKind::FinallyExit),
+            "a finalizer-local goto must use cleanup completion edges"
+        );
+        let mut targets: Vec<_> = edges.into_iter().map(|(target, _)| target).collect();
+        targets.sort_by_key(|target| target.index());
+        actual_pairs.push(targets);
+    }
+    actual_pairs.sort_by_key(|pair| pair[0].index());
+    assert_eq!(
+        actual_pairs, expected_pairs,
+        "each finalizer clone must target its own conditional-label pair"
+    );
+
+    let exit = block_with_stmt(cfg, &source, "statement", "Exit");
+    let after = block_with_stmt(cfg, &source, "statement", "After");
+    assert!(
+        !can_reach(cfg, exit, after),
+        "Exit must not reach the post-finalizer continuation"
+    );
+}
+
+#[test]
+fn preprocessor_labels_in_each_finalizer_clone_keep_backward_targets_local() {
+    let source = br#"
+unit BackwardConditionalFinalizerLabels;
+interface
+implementation
+
+procedure BackwardConditionalFinalizerLabels;
+label Done;
+begin
+  try
+    if Flag then Exit;
+  finally
+    {$IFDEF A}
+    Done: CleanupA;
+    {$ELSE}
+    Done: CleanupB;
+    {$ENDIF}
+    if Retry then goto Done;
+    Tail;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "BackwardConditionalFinalizerLabels");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+    let labels = blocks_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(gotos.len(), 3);
+    assert_eq!(labels.len(), 6);
+
+    let expected_pairs: Vec<Vec<BlockId>> =
+        labels.chunks_exact(2).map(|pair| pair.to_vec()).collect();
+    let mut actual_pairs = Vec::new();
+    for goto in gotos {
+        let edges = successors(cfg, goto);
+        assert_eq!(
+            edges.len(),
+            2,
+            "each clone must resolve both feasible labels"
+        );
+        assert!(
+            edges.iter().all(|(_, kind)| *kind == EdgeKind::FinallyExit),
+            "a finalizer-local goto must use cleanup completion edges"
+        );
+        let mut targets: Vec<_> = edges.into_iter().map(|(target, _)| target).collect();
+        targets.sort_by_key(|target| target.index());
+        actual_pairs.push(targets);
+    }
+    actual_pairs.sort_by_key(|pair| pair[0].index());
+    assert_eq!(
+        actual_pairs, expected_pairs,
+        "each finalizer clone must target its own conditional-label pair"
+    );
+
+    let exit = block_with_stmt(cfg, &source, "statement", "Exit");
+    let after = block_with_stmt(cfg, &source, "statement", "After");
+    assert!(
+        !can_reach(cfg, exit, after),
+        "Exit must not reach the post-finalizer continuation"
+    );
 }
 
 #[test]

@@ -1,8 +1,11 @@
+use std::{collections::HashSet, ops::Range};
+
 use cfg_core::{BasicBlockKind, BlockId, Cfg, CfgBuildSink, DefaultCfgBuilder, EdgeKind, StmtRef};
 use tree_sitter::Node;
 
 use crate::constructs::{
-    is_break_call, is_continue_call, is_exit_call, node_text, ExceptionFrame, LoopFrame,
+    is_break_call, is_continue_call, is_exit_call, node_text, raised_exception_type, Flow,
+    LoopFrame, PendingTransfer, ScopeId, TransferKind,
 };
 
 /// Build CFGs for all procedure/function definitions in a parsed Pascal file.
@@ -20,9 +23,8 @@ fn collect_def_proc_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
         if let Some(cfg) = build_proc_cfg(node, source) {
             out.push(cfg);
         }
-        // Don't recurse into defProc to avoid nested procedure confusion.
-        // Nested procedures would be their own defProc children and are
-        // collected separately.
+        // Nested procedures are deliberately left for Task 4. Do not execute
+        // their bodies as part of the containing routine's CFG.
         return;
     }
 
@@ -53,15 +55,14 @@ fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
         exit,
         source,
         loop_stack: Vec::new(),
-        exception_stack: Vec::new(),
+        cleanup_scopes: Vec::new(),
+        next_scope_id: 0,
+        implicit_exception_depth: 0,
+        block_has_stmt: HashSet::new(),
     };
 
-    let final_block = walk_block_stmts(&mut ctx, block, body);
-
-    // Connect the final block to exit if it isn't already terminated.
-    if let Some(fb) = final_block {
-        ctx.builder.add_edge(fb, exit, EdgeKind::Normal);
-    }
+    let final_flow = walk_block_stmts(&mut ctx, block, body);
+    finish_flow(&mut ctx, final_flow);
 
     Some(builder.finish())
 }
@@ -87,8 +88,9 @@ fn extract_proc_name(def_proc: Node, source: &[u8]) -> Option<String> {
         .children(&mut cursor)
         .find(|c| c.kind() == "genericDot")
     {
+        let mut generic_cursor = generic_dot.walk();
         let idents: Vec<Node> = generic_dot
-            .children(&mut generic_dot.walk())
+            .children(&mut generic_cursor)
             .filter(|c| c.kind() == "identifier")
             .collect();
 
@@ -126,658 +128,795 @@ struct BuildContext<'a> {
     exit: BlockId,
     source: &'a [u8],
     loop_stack: Vec<LoopFrame>,
-    exception_stack: Vec<ExceptionFrame>,
+    cleanup_scopes: Vec<ScopeId>,
+    next_scope_id: ScopeId,
+    /// Nonzero while walking a try body, handler, or finally body.  This is
+    /// intentionally independent from `cleanup_scopes`: handlers/finalizers
+    /// may throw outward even though the scope whose handler they belong to
+    /// is no longer an active catch target.
+    implicit_exception_depth: usize,
+    /// Protected statements are split into separate blocks so their
+    /// exceptional edge cannot also cover an earlier unprotected statement.
+    block_has_stmt: HashSet<BlockId>,
 }
 
-/// Walk the children of a `block` node, building CFG blocks and edges.
-///
-/// Returns `Some(block_id)` for the block that control falls through to,
-/// or `None` if control does not fall through (e.g., raise/exit terminated it).
-fn walk_block_stmts(ctx: &mut BuildContext, block: Node, mut current: BlockId) -> Option<BlockId> {
-    let mut cursor = block.walk();
-    for child in block.children(&mut cursor) {
-        match child.kind() {
-            // Skip structural tokens
-            "kBegin" | "kEnd" | ";" | "declVars" | "declConsts" | "declTypes" => continue,
-            _ => match process_single_stmt(ctx, child, current) {
-                Some(next) => current = next,
-                None => return None,
-            },
-        }
+fn new_block(ctx: &mut BuildContext<'_>, kind: BasicBlockKind) -> BlockId {
+    ctx.builder.new_block(kind)
+}
+
+/// Add a final edge for every flow that has reached the procedure boundary.
+fn finish_flow(ctx: &mut BuildContext<'_>, flow: Flow) {
+    if let Some(normal) = flow.normal {
+        ctx.builder.add_edge(normal, ctx.exit, EdgeKind::Normal);
     }
 
-    Some(current)
+    for transfer in flow.transfers {
+        route_transfer(ctx, transfer);
+    }
+}
+
+fn route_transfer(ctx: &mut BuildContext<'_>, transfer: PendingTransfer) {
+    match transfer.kind {
+        TransferKind::Exception => {
+            ctx.builder
+                .add_edge(transfer.source, ctx.exit, EdgeKind::ExceptionThrow);
+        }
+        TransferKind::Exit => {
+            ctx.builder.add_edge(
+                transfer.source,
+                ctx.exit,
+                transfer_completion_edge(&transfer),
+            );
+        }
+        TransferKind::Break | TransferKind::Continue => {
+            if let Some(target) = transfer.target {
+                ctx.builder
+                    .add_edge(transfer.source, target, transfer_completion_edge(&transfer));
+            }
+        }
+    }
+}
+
+fn transfer_completion_edge(transfer: &PendingTransfer) -> EdgeKind {
+    if transfer.from_finally {
+        EdgeKind::FinallyExit
+    } else {
+        EdgeKind::Normal
+    }
+}
+
+/// Walk the children of a `block`, preserving all abrupt paths from branches.
+fn walk_block_stmts(ctx: &mut BuildContext<'_>, block: Node, current: BlockId) -> Flow {
+    let mut cursor = block.walk();
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
+
+    for child in block.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "kBegin" | "kEnd" | ";" | "declVars" | "declConsts" | "declTypes"
+        ) {
+            continue;
+        }
+
+        let Some(normal) = current else {
+            break;
+        };
+        let child_flow = process_single_stmt(ctx, child, normal);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
+    }
+
+    Flow {
+        normal: current,
+        transfers,
+    }
+}
+
+/// Walk a `statements` node, processing each child statement.
+fn walk_statements_node(
+    ctx: &mut BuildContext<'_>,
+    statements_node: Node,
+    current: BlockId,
+) -> Flow {
+    let mut cursor = statements_node.walk();
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
+
+    for child in statements_node.children(&mut cursor) {
+        if child.kind() == ";" {
+            continue;
+        }
+
+        let Some(normal) = current else {
+            break;
+        };
+        let child_flow = process_single_stmt(ctx, child, normal);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
+    }
+
+    Flow {
+        normal: current,
+        transfers,
+    }
+}
+
+/// Process all children stored under a statement field such as `then`,
+/// `else`, `body`, or an exception handler's body.
+fn walk_field_children(
+    ctx: &mut BuildContext<'_>,
+    parent: Node,
+    field_name: &str,
+    current: BlockId,
+    skip_k_else: bool,
+) -> Flow {
+    let children = field_children(parent, field_name);
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
+
+    for child in children {
+        if child.kind() == ";" || (skip_k_else && child.kind() == "kElse") {
+            continue;
+        }
+
+        let Some(normal) = current else {
+            break;
+        };
+        let child_flow = process_single_stmt(ctx, child, normal);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
+    }
+
+    Flow {
+        normal: current,
+        transfers,
+    }
 }
 
 /// Handle an `ifElse` node (if/then/else).
-///
-/// Creates a diamond pattern:
-///   current --ConditionalTrue-->  then_block
-///   current --ConditionalFalse--> else_block
-///   then_block  --Normal--> join
-///   else_block  --Normal--> join
-///
-/// Returns `Some(join)` if at least one branch falls through, `None` if both terminate.
-fn handle_if_else(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    // Add the if condition as a statement on the current block
-    if let Some(cond) = node.child_by_field_name("condition") {
-        add_stmt_ref(ctx, current, cond);
+fn handle_if_else(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let condition_block = prepare_condition_block(ctx, node, current);
+    let mut transfers = implicit_exception_transfers(ctx, condition_block);
+
+    let then_block = new_block(ctx, BasicBlockKind::Normal);
+    let else_block = new_block(ctx, BasicBlockKind::Normal);
+    ctx.builder
+        .add_edge(condition_block, then_block, EdgeKind::ConditionalTrue);
+    ctx.builder
+        .add_edge(condition_block, else_block, EdgeKind::ConditionalFalse);
+
+    let then_flow = walk_field_children(ctx, node, "then", then_block, true);
+    let else_flow = walk_field_children(ctx, node, "else", else_block, true);
+    let normal = join_branch_flows(ctx, then_flow.normal, else_flow.normal);
+
+    transfers.extend(then_flow.transfers);
+    transfers.extend(else_flow.transfers);
+
+    Flow { normal, transfers }
+}
+
+/// Handle an `if` node (if/then without else).
+fn handle_if_only(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let condition_block = prepare_condition_block(ctx, node, current);
+    let mut transfers = implicit_exception_transfers(ctx, condition_block);
+
+    let then_block = new_block(ctx, BasicBlockKind::Normal);
+    let join = new_block(ctx, BasicBlockKind::Normal);
+    ctx.builder
+        .add_edge(condition_block, then_block, EdgeKind::ConditionalTrue);
+    ctx.builder
+        .add_edge(condition_block, join, EdgeKind::ConditionalFalse);
+
+    let then_flow = walk_field_children(ctx, node, "then", then_block, true);
+    if let Some(then_end) = then_flow.normal {
+        ctx.builder.add_edge(then_end, join, EdgeKind::Normal);
     }
+    transfers.extend(then_flow.transfers);
 
-    let then_block = ctx.builder.new_block(BasicBlockKind::Normal);
-    let else_block = ctx.builder.new_block(BasicBlockKind::Normal);
+    Flow {
+        normal: Some(join),
+        transfers,
+    }
+}
 
-    ctx.builder
-        .add_edge(current, then_block, EdgeKind::ConditionalTrue);
-    ctx.builder
-        .add_edge(current, else_block, EdgeKind::ConditionalFalse);
-
-    // Process then branch
-    let then_end = process_branch_child(ctx, node, "then", then_block);
-
-    // Process else branch
-    let else_end = process_branch_child(ctx, node, "else", else_block);
-
-    // Create join block if at least one branch falls through
+fn join_branch_flows(
+    ctx: &mut BuildContext<'_>,
+    then_end: Option<BlockId>,
+    else_end: Option<BlockId>,
+) -> Option<BlockId> {
     match (then_end, else_end) {
-        (Some(t), Some(e)) => {
-            let join = ctx.builder.new_block(BasicBlockKind::Normal);
-            ctx.builder.add_edge(t, join, EdgeKind::Normal);
-            ctx.builder.add_edge(e, join, EdgeKind::Normal);
+        (Some(then_end), Some(else_end)) => {
+            let join = new_block(ctx, BasicBlockKind::Normal);
+            ctx.builder.add_edge(then_end, join, EdgeKind::Normal);
+            ctx.builder.add_edge(else_end, join, EdgeKind::Normal);
             Some(join)
         }
-        (Some(t), None) => {
-            let join = ctx.builder.new_block(BasicBlockKind::Normal);
-            ctx.builder.add_edge(t, join, EdgeKind::Normal);
-            Some(join)
-        }
-        (None, Some(e)) => {
-            let join = ctx.builder.new_block(BasicBlockKind::Normal);
-            ctx.builder.add_edge(e, join, EdgeKind::Normal);
+        (Some(end), None) | (None, Some(end)) => {
+            let join = new_block(ctx, BasicBlockKind::Normal);
+            ctx.builder.add_edge(end, join, EdgeKind::Normal);
             Some(join)
         }
         (None, None) => None,
     }
 }
 
-/// Handle an `if` node (if/then without else).
-///
-/// Creates:
-///   current --ConditionalTrue-->  then_block
-///   current --ConditionalFalse--> join
-///   then_block  --Normal--> join
-///
-/// Returns `Some(join)` always since the false branch always falls through.
-fn handle_if_only(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    // Add the if condition as a statement on the current block so that
-    // dataflow analysis sees variable references in the condition expression.
-    if let Some(cond) = node.child_by_field_name("condition") {
-        add_stmt_ref(ctx, current, cond);
-    }
+/// Handle a `for` or `while` loop.
+fn handle_for_or_while(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let cond_block = new_block(ctx, BasicBlockKind::Normal);
+    let body_block = new_block(ctx, BasicBlockKind::Normal);
+    let after_block = new_block(ctx, BasicBlockKind::Normal);
 
-    let then_block = ctx.builder.new_block(BasicBlockKind::Normal);
-    let join = ctx.builder.new_block(BasicBlockKind::Normal);
-
-    ctx.builder
-        .add_edge(current, then_block, EdgeKind::ConditionalTrue);
-    ctx.builder
-        .add_edge(current, join, EdgeKind::ConditionalFalse);
-
-    // The then body of an `if` (without else) is a direct child.
-    // It can be a `statement` node, a `block`, or another statement type.
-    let then_end = process_if_then_children(ctx, node, then_block);
-
-    if let Some(te) = then_end {
-        ctx.builder.add_edge(te, join, EdgeKind::Normal);
-    }
-
-    Some(join)
-}
-
-/// Process the then-body children of an `if` node (no else).
-///
-/// The `if` node has children: kIf, condition, kThen, then-body-statement.
-/// We need to find the then-body statement(s) after `kThen`.
-fn process_if_then_children(
-    ctx: &mut BuildContext,
-    if_node: Node,
-    then_block: BlockId,
-) -> Option<BlockId> {
-    let mut cursor = if_node.walk();
-
-    let mut current = then_block;
-    for child in if_node.children_by_field_name("then", &mut cursor) {
-        if child.kind() == ";" {
-            continue;
-        }
-        match process_single_stmt(ctx, child, current) {
-            Some(next) => current = next,
-            None => return None,
-        }
-    }
-
-    Some(current)
-}
-
-/// Process a field-named branch child (used for "then" and "else" fields of ifElse).
-fn process_branch_child(
-    ctx: &mut BuildContext,
-    parent: Node,
-    field_name: &str,
-    branch_block: BlockId,
-) -> Option<BlockId> {
-    let mut current = branch_block;
-    let mut cursor = parent.walk();
-
-    for child in parent.children_by_field_name(field_name, &mut cursor) {
-        // Skip keyword and punctuation nodes
-        match child.kind() {
-            "kElse" | "kThen" | ";" => continue,
-            _ => {}
-        }
-
-        match process_single_stmt(ctx, child, current) {
-            Some(next) => current = next,
-            None => return None,
-        }
-    }
-
-    Some(current)
-}
-
-/// Handle a `for` or `while` loop node.
-///
-/// CFG pattern:
-///   current -> cond_block --ConditionalTrue-->  body_block
-///                         --LoopExit-->         after_block
-///   body_block -> cond_block (LoopBack)
-///
-/// Returns `Some(after_block)` always since the loop can exit via LoopExit.
-fn handle_for_or_while(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    let cond_block = ctx.builder.new_block(BasicBlockKind::Normal);
-    let body_block = ctx.builder.new_block(BasicBlockKind::Normal);
-    let after_block = ctx.builder.new_block(BasicBlockKind::Normal);
-
-    // Add the condition expression as a statement on the cond_block.
-    // For `for`: the init assignment and limit are the "condition" concept.
-    // For `while`: the condition expression precedes kDo.
-    add_stmt_ref(ctx, cond_block, node);
-
-    // current -> cond_block
     ctx.builder.add_edge(current, cond_block, EdgeKind::Normal);
-    // cond_block -> body_block (loop enters)
+    add_loop_header_stmt(ctx, cond_block, node);
+    let mut transfers = implicit_exception_transfers(ctx, cond_block);
+
     ctx.builder
         .add_edge(cond_block, body_block, EdgeKind::ConditionalTrue);
-    // cond_block -> after_block (loop exits)
     ctx.builder
         .add_edge(cond_block, after_block, EdgeKind::LoopExit);
 
-    // Push loop frame for break/continue
+    let target_scopes = ctx.cleanup_scopes.clone();
     ctx.loop_stack.push(LoopFrame {
         continue_target: cond_block,
         break_target: after_block,
+        continue_scopes: target_scopes.clone(),
+        break_scopes: target_scopes,
     });
-
-    // Find and process the body (the statement/block after kDo)
-    let body_end = process_loop_body_after_kdo(ctx, node, body_block);
-
+    let body_flow = walk_field_children(ctx, node, "body", body_block, false);
     ctx.loop_stack.pop();
 
-    // body -> cond_block (LoopBack)
-    if let Some(be) = body_end {
-        ctx.builder.add_edge(be, cond_block, EdgeKind::LoopBack);
+    if let Some(body_end) = body_flow.normal {
+        ctx.builder
+            .add_edge(body_end, cond_block, EdgeKind::LoopBack);
     }
 
-    Some(after_block)
+    for transfer in body_flow.transfers {
+        if transfer.kind == TransferKind::Break && transfer.target == Some(after_block) {
+            ctx.builder.add_edge(
+                transfer.source,
+                after_block,
+                transfer_completion_edge(&transfer),
+            );
+        } else if transfer.kind == TransferKind::Continue && transfer.target == Some(cond_block) {
+            ctx.builder.add_edge(
+                transfer.source,
+                cond_block,
+                transfer_completion_edge(&transfer),
+            );
+        } else {
+            transfers.push(transfer);
+        }
+    }
+
+    Flow {
+        normal: Some(after_block),
+        transfers,
+    }
 }
 
-/// Handle a `repeat..until` loop node.
-///
-/// CFG pattern:
-///   current -> body_block -> cond_block --LoopBack-->  body_block
-///                                       --LoopExit-->  after_block
-///
-/// Returns `Some(after_block)`.
-fn handle_repeat(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    let body_block = ctx.builder.new_block(BasicBlockKind::Normal);
-    let cond_block = ctx.builder.new_block(BasicBlockKind::Normal);
-    let after_block = ctx.builder.new_block(BasicBlockKind::Normal);
+/// Handle a `repeat..until` loop.
+fn handle_repeat(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let body_block = new_block(ctx, BasicBlockKind::Normal);
+    let cond_block = new_block(ctx, BasicBlockKind::Normal);
+    let after_block = new_block(ctx, BasicBlockKind::Normal);
 
-    // current -> body_block
     ctx.builder.add_edge(current, body_block, EdgeKind::Normal);
 
-    // Push loop frame for break/continue
+    let target_scopes = ctx.cleanup_scopes.clone();
     ctx.loop_stack.push(LoopFrame {
         continue_target: cond_block,
         break_target: after_block,
+        continue_scopes: target_scopes.clone(),
+        break_scopes: target_scopes,
     });
-
-    // Process the body: children between kRepeat and kUntil.
-    // The body is in a `statements` child node.
-    let body_end = process_repeat_body(ctx, node, body_block);
-
+    let body_flow = walk_field_children(ctx, node, "body", body_block, false);
     ctx.loop_stack.pop();
 
-    // A terminated body already has its abrupt successor (for example the
-    // procedure exit for `Exit` or the active exception target for `raise`).
-    // Only a body that falls through may continue to the `until` condition.
-    if let Some(body_final) = body_end {
-        ctx.builder
-            .add_edge(body_final, cond_block, EdgeKind::Normal);
+    if let Some(body_end) = body_flow.normal {
+        ctx.builder.add_edge(body_end, cond_block, EdgeKind::Normal);
     }
 
-    // Add the until condition as a statement on the cond_block
-    add_stmt_ref(ctx, cond_block, node);
+    let mut transfers = implicit_exception_transfers(ctx, cond_block);
+    for transfer in body_flow.transfers {
+        if transfer.kind == TransferKind::Break && transfer.target == Some(after_block) {
+            ctx.builder.add_edge(
+                transfer.source,
+                after_block,
+                transfer_completion_edge(&transfer),
+            );
+        } else if transfer.kind == TransferKind::Continue && transfer.target == Some(cond_block) {
+            ctx.builder.add_edge(
+                transfer.source,
+                cond_block,
+                transfer_completion_edge(&transfer),
+            );
+        } else {
+            transfers.push(transfer);
+        }
+    }
 
-    // cond_block -> body_block (LoopBack, condition false = keep looping)
+    add_repeat_header_stmts(ctx, cond_block, node);
     ctx.builder
         .add_edge(cond_block, body_block, EdgeKind::LoopBack);
-    // cond_block -> after_block (LoopExit, condition true = exit)
     ctx.builder
         .add_edge(cond_block, after_block, EdgeKind::LoopExit);
 
-    Some(after_block)
-}
-
-/// Process the body of a for/while loop: finds the statement after kDo and walks it.
-fn process_loop_body_after_kdo(
-    ctx: &mut BuildContext,
-    loop_node: Node,
-    body_block: BlockId,
-) -> Option<BlockId> {
-    let mut past_do = false;
-    let mut cursor = loop_node.walk();
-
-    for child in loop_node.children(&mut cursor) {
-        if child.kind() == "kDo" {
-            past_do = true;
-            continue;
-        }
-        if !past_do {
-            continue;
-        }
-        // Skip semicolons
-        if child.kind() == ";" {
-            continue;
-        }
-
-        // Process the body statement
-        return process_single_stmt(ctx, child, body_block);
+    Flow {
+        normal: Some(after_block),
+        transfers,
     }
-
-    Some(body_block)
 }
 
-/// Process the body of a repeat..until loop: walks the `statements` child.
-fn process_repeat_body(
-    ctx: &mut BuildContext,
-    repeat_node: Node,
-    body_block: BlockId,
-) -> Option<BlockId> {
-    let mut current = body_block;
-    let mut cursor = repeat_node.walk();
-
-    for child in repeat_node.children(&mut cursor) {
-        match child.kind() {
-            "kRepeat" | "kUntil" | ";" => continue,
-            "statements" => {
-                // Walk the statements inside the repeat body
-                let mut inner_cursor = child.walk();
-                for stmt in child.children(&mut inner_cursor) {
-                    match stmt.kind() {
-                        ";" => continue,
-                        _ => match process_single_stmt(ctx, stmt, current) {
-                            Some(next) => current = next,
-                            None => return None,
-                        },
-                    }
-                }
-                return Some(current);
-            }
-            _ => {
-                // If the condition or other node types appear, skip them
-                // (they come after kUntil)
-            }
-        }
-    }
-
-    Some(current)
-}
-
-/// Process a single statement node in a loop body or similar context.
-///
-/// Handles block, if, ifElse, raise, exit, break, continue, and other statements.
-fn process_single_stmt(ctx: &mut BuildContext, child: Node, current: BlockId) -> Option<BlockId> {
+/// Process a single statement node in any syntactic context.
+fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId) -> Flow {
     match child.kind() {
         "block" => walk_block_stmts(ctx, child, current),
         "statements" => walk_statements_node(ctx, child, current),
         "ifElse" => handle_if_else(ctx, child, current),
         "if" => handle_if_only(ctx, child, current),
-        "raise" => {
-            handle_raise(ctx, child, current);
-            None
-        }
-        "try" => handle_try(ctx, child, current),
         "for" | "while" => handle_for_or_while(ctx, child, current),
         "repeat" => handle_repeat(ctx, child, current),
+        "try" => handle_try(ctx, child, current),
+        "raise" => {
+            let statement_block = prepare_statement_block(ctx, current);
+            add_stmt_ref(ctx, statement_block, child);
+            let transfer = raised_exception_type(child, ctx.source)
+                .map(|exception_type| {
+                    PendingTransfer::exception_with_type(statement_block, exception_type)
+                })
+                .unwrap_or_else(|| PendingTransfer::exception(statement_block));
+            Flow::transfer(transfer)
+        }
         "statement" if is_exit_call(child, ctx.source) => {
-            add_stmt_ref(ctx, current, child);
-            ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-            None
+            let statement_block = prepare_statement_block(ctx, current);
+            add_stmt_ref(ctx, statement_block, child);
+            Flow::transfer(PendingTransfer::exit(statement_block))
         }
         "statement" if is_break_call(child, ctx.source) => {
-            add_stmt_ref(ctx, current, child);
-            if let Some(frame) = ctx.loop_stack.last() {
-                ctx.builder
-                    .add_edge(current, frame.break_target, EdgeKind::Normal);
-            }
-            None
+            let statement_block = prepare_statement_block(ctx, current);
+            add_stmt_ref(ctx, statement_block, child);
+            let transfer = if let Some(frame) = ctx.loop_stack.last() {
+                PendingTransfer::block_target(
+                    statement_block,
+                    TransferKind::Break,
+                    frame.break_target,
+                    frame.break_scopes.clone(),
+                )
+            } else {
+                PendingTransfer::exit(statement_block)
+            };
+            Flow::transfer(transfer)
         }
         "statement" if is_continue_call(child, ctx.source) => {
-            add_stmt_ref(ctx, current, child);
-            if let Some(frame) = ctx.loop_stack.last() {
-                ctx.builder
-                    .add_edge(current, frame.continue_target, EdgeKind::Normal);
-            }
-            None
+            let statement_block = prepare_statement_block(ctx, current);
+            add_stmt_ref(ctx, statement_block, child);
+            let transfer = if let Some(frame) = ctx.loop_stack.last() {
+                PendingTransfer::block_target(
+                    statement_block,
+                    TransferKind::Continue,
+                    frame.continue_target,
+                    frame.continue_scopes.clone(),
+                )
+            } else {
+                PendingTransfer::exit(statement_block)
+            };
+            Flow::transfer(transfer)
         }
         _ => {
-            if is_exit_call(child, ctx.source) {
-                add_stmt_ref(ctx, current, child);
-                ctx.builder.add_edge(current, ctx.exit, EdgeKind::Normal);
-                return None;
+            let statement_block = prepare_statement_block(ctx, current);
+            add_stmt_ref(ctx, statement_block, child);
+            Flow {
+                normal: Some(statement_block),
+                transfers: implicit_exception_transfers(ctx, statement_block),
             }
-            add_stmt_ref(ctx, current, child);
-            Some(current)
         }
     }
 }
 
-/// Handle a `try` node (try..finally or try..except).
-///
-/// Determines whether the try block has a `finally` or `except` section
-/// by scanning children for `kFinally` or `kExcept`, then delegates
-/// to the appropriate handler.
-fn handle_try(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    let mut has_finally = false;
-    let mut has_except = false;
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "kFinally" => has_finally = true,
-            "kExcept" => has_except = true,
-            _ => {}
-        }
-    }
+/// Handle either `try..finally` or `try..except` based on parser fields.
+fn handle_try(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let has_finally = field_children(node, "finally")
+        .iter()
+        .any(|child| child.kind() == "kFinally");
+    let has_except = field_children(node, "except")
+        .iter()
+        .any(|child| child.kind() == "kExcept");
 
     if has_finally {
         handle_try_finally(ctx, node, current)
     } else if has_except {
         handle_try_except(ctx, node, current)
     } else {
-        // Malformed try block — treat as a plain block
-        Some(current)
+        // A malformed try node should not swallow the following statement.
+        Flow::normal(current)
     }
+}
+
+#[derive(Debug)]
+enum FinalizerInput {
+    Normal(BlockId),
+    Transfer(PendingTransfer),
 }
 
 /// Handle a `try..finally` block.
 ///
-/// CFG pattern:
-///   current -> [try body] --FinallyEntry--> finally_block --FinallyExit--> after
-///   (any raise in try body) --ExceptionThrow--> finally_block
-fn handle_try_finally(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    let finally_block = ctx.builder.new_block(BasicBlockKind::FinallyHandler);
-    let after_block = ctx.builder.new_block(BasicBlockKind::Normal);
+/// Every incoming continuation gets its own finalizer entry/body. Sharing a
+/// single finalizer block would create cross-path edges: a `Break` could leave
+/// through a finalizer instance belonging to `Continue`, for example.
+fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let scope_id = ctx.next_scope_id;
+    ctx.next_scope_id += 1;
+    let after_block = new_block(ctx, BasicBlockKind::Normal);
 
-    // Implicit exception edge: any statement in the try body could throw,
-    // so add an ExceptionThrow edge from the current block to finally.
-    ctx.builder
-        .add_edge(current, finally_block, EdgeKind::ExceptionThrow);
+    ctx.cleanup_scopes.push(scope_id);
+    ctx.implicit_exception_depth += 1;
+    let try_flow = walk_try_body(ctx, node, current);
+    ctx.implicit_exception_depth -= 1;
+    ctx.cleanup_scopes.pop();
 
-    // Push exception frame so raise routes to finally
-    ctx.exception_stack.push(ExceptionFrame {
-        finally_entry: Some(finally_block),
-        except_entry: None,
-    });
+    let mut inputs = Vec::new();
+    if let Some(normal) = try_flow.normal {
+        inputs.push(FinalizerInput::Normal(normal));
+    }
+    inputs.extend(try_flow.transfers.into_iter().map(FinalizerInput::Transfer));
 
-    // Walk the try body (the `statements` node between kTry and kFinally)
-    let try_body_end = walk_try_body(ctx, node, current);
+    let mut output = Flow::default();
+    for input in inputs {
+        if let FinalizerInput::Transfer(transfer) = &input {
+            if !transfer.leaves_scope(scope_id) {
+                output.transfers.push(transfer.clone());
+                continue;
+            }
+        }
 
-    ctx.exception_stack.pop();
+        let (source, entry_edge) = match &input {
+            FinalizerInput::Normal(source) => (*source, EdgeKind::FinallyEntry),
+            FinalizerInput::Transfer(transfer) => (
+                transfer.source,
+                if transfer.kind == TransferKind::Exception {
+                    EdgeKind::ExceptionThrow
+                } else {
+                    EdgeKind::FinallyEntry
+                },
+            ),
+        };
 
-    // Normal path: try body falls through to finally
-    if let Some(tb) = try_body_end {
-        ctx.builder
-            .add_edge(tb, finally_block, EdgeKind::FinallyEntry);
+        let finally_block = new_block(ctx, BasicBlockKind::FinallyHandler);
+        ctx.builder.add_edge(source, finally_block, entry_edge);
+
+        ctx.implicit_exception_depth += 1;
+        let finally_flow = walk_finally_body(ctx, node, finally_block);
+        ctx.implicit_exception_depth -= 1;
+
+        if let Some(finally_end) = finally_flow.normal {
+            match input {
+                FinalizerInput::Normal(_) => {
+                    ctx.builder
+                        .add_edge(finally_end, after_block, EdgeKind::FinallyExit);
+                    output.normal = Some(after_block);
+                }
+                FinalizerInput::Transfer(transfer) => {
+                    // The finalizer completed normally, so the original
+                    // transfer remains pending for outer cleanup scopes.
+                    output.transfers.push(transfer.with_source(finally_end));
+                }
+            }
+        }
+
+        // Any transfer produced by the finalizer itself supersedes the
+        // incoming transfer. It is already sourced in the finalizer clone and
+        // is routed by an enclosing cleanup scope (or the procedure boundary).
+        output.transfers.extend(finally_flow.transfers);
     }
 
-    // Walk the finally body (the `statements` node after kFinally)
-    let finally_end = walk_finally_body(ctx, node, finally_block);
-
-    // Finally exits to the after block
-    if let Some(fb) = finally_end {
-        ctx.builder.add_edge(fb, after_block, EdgeKind::FinallyExit);
-    }
-
-    Some(after_block)
+    output
 }
 
 /// Handle a `try..except` block.
 ///
-/// CFG pattern:
-///   current -> [try body] --Normal--> after (no exception)
-///   (any raise in try body) --ExceptionThrow--> except_block
-///   except_block -> [handler body] --Normal--> after
-fn handle_try_except(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option<BlockId> {
-    let except_block = ctx.builder.new_block(BasicBlockKind::ExceptHandler);
-    let after_block = ctx.builder.new_block(BasicBlockKind::Normal);
+/// Typed `on` handlers are conservative alternatives for an unknown
+/// exception. A missing catch-all retains an unmatched exception transfer so
+/// an enclosing handler can receive it.
+fn handle_try_except(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let after_block = new_block(ctx, BasicBlockKind::Normal);
 
-    // Implicit exception edge: any statement in the try body could throw,
-    // so add an ExceptionThrow edge from the current block to except handler.
-    ctx.builder
-        .add_edge(current, except_block, EdgeKind::ExceptionThrow);
+    ctx.implicit_exception_depth += 1;
+    let try_flow = walk_try_body(ctx, node, current);
+    ctx.implicit_exception_depth -= 1;
 
-    // Push exception frame so raise routes to except handler
-    ctx.exception_stack.push(ExceptionFrame {
-        finally_entry: None,
-        except_entry: Some(except_block),
-    });
-
-    // Walk the try body (the `statements` node between kTry and kExcept)
-    let try_body_end = walk_try_body(ctx, node, current);
-
-    ctx.exception_stack.pop();
-
-    // Normal path: try body falls through to after (no exception raised)
-    if let Some(tb) = try_body_end {
-        ctx.builder.add_edge(tb, after_block, EdgeKind::Normal);
+    let mut output = Flow::default();
+    if let Some(try_end) = try_flow.normal {
+        ctx.builder.add_edge(try_end, after_block, EdgeKind::Normal);
+        output.normal = Some(after_block);
     }
 
-    // Walk the except handler bodies
-    let except_end = walk_except_handlers(ctx, node, except_block);
-
-    // Except handler falls through to after
-    if let Some(eb) = except_end {
-        ctx.builder.add_edge(eb, after_block, EdgeKind::Normal);
-    }
-
-    Some(after_block)
-}
-
-/// Walk the try body: the `statements` node that appears between kTry and kFinally/kExcept.
-///
-/// Continues from `current`, which is the block before or at the try statement.
-fn walk_try_body(ctx: &mut BuildContext, try_node: Node, current: BlockId) -> Option<BlockId> {
-    let mut cursor = try_node.walk();
-    let mut past_try = false;
-
-    for child in try_node.children(&mut cursor) {
-        match child.kind() {
-            "kTry" => {
-                past_try = true;
-                continue;
+    let mut exception_sources = Vec::new();
+    for transfer in try_flow.transfers {
+        if transfer.kind == TransferKind::Exception {
+            if !exception_sources.iter().any(|existing: &PendingTransfer| {
+                existing.source == transfer.source
+                    && existing.exception_type == transfer.exception_type
+            }) {
+                exception_sources.push(transfer);
             }
-            "kFinally" | "kExcept" => break,
-            _ if !past_try => continue,
-            _ => {}
-        }
-
-        if child.kind() == "statements" {
-            return walk_statements_node(ctx, child, current);
+        } else {
+            output.transfers.push(transfer);
         }
     }
 
-    Some(current)
-}
+    let handlers = build_except_handlers(ctx, node, after_block);
+    let has_catch_all = handlers.iter().any(|handler| handler.catch_all);
 
-/// Walk a `statements` node, processing each child statement.
-fn walk_statements_node(
-    ctx: &mut BuildContext,
-    statements_node: Node,
-    mut current: BlockId,
-) -> Option<BlockId> {
-    let mut cursor = statements_node.walk();
-    for child in statements_node.children(&mut cursor) {
-        match child.kind() {
-            ";" => continue,
-            _ => match process_single_stmt(ctx, child, current) {
-                Some(next) => current = next,
-                None => return None,
-            },
-        }
-    }
-    Some(current)
-}
+    for transfer in exception_sources {
+        let known_type = transfer.exception_type.as_deref();
+        let typed_match = known_type.is_some_and(|exception_type| {
+            handlers.iter().any(|handler| {
+                !handler.catch_all
+                    && handler
+                        .exception_type
+                        .as_deref()
+                        .is_some_and(|handler_type| {
+                            handler_type.eq_ignore_ascii_case(exception_type)
+                        })
+            })
+        });
 
-/// Walk the finally body: the `statements` node that appears after kFinally.
-fn walk_finally_body(
-    ctx: &mut BuildContext,
-    try_node: Node,
-    finally_block: BlockId,
-) -> Option<BlockId> {
-    let mut cursor = try_node.walk();
-    let mut past_finally = false;
+        let mut matched = false;
+        for handler in &handlers {
+            let should_dispatch = match known_type {
+                Some(_) if typed_match => {
+                    !handler.catch_all
+                        && handler
+                            .exception_type
+                            .as_deref()
+                            .is_some_and(|handler_type| {
+                                handler_type.eq_ignore_ascii_case(known_type.unwrap_or_default())
+                            })
+                }
+                Some(_) => handler.catch_all,
+                None => true,
+            };
 
-    for child in try_node.children(&mut cursor) {
-        match child.kind() {
-            "kFinally" => {
-                past_finally = true;
-                continue;
-            }
-            "kEnd" | ";" => continue,
-            _ if !past_finally => continue,
-            _ => {}
-        }
-
-        if child.kind() == "statements" {
-            return walk_statements_node(ctx, child, finally_block);
-        }
-    }
-
-    Some(finally_block)
-}
-
-/// Walk the except handlers: `exceptionHandler` nodes after kExcept.
-///
-/// Each `exceptionHandler` has: kOn, identifier, `:`, typeref, kDo, statement/block.
-fn walk_except_handlers(
-    ctx: &mut BuildContext,
-    try_node: Node,
-    except_block: BlockId,
-) -> Option<BlockId> {
-    let mut cursor = try_node.walk();
-    let mut past_except = false;
-    let mut current = except_block;
-
-    for child in try_node.children(&mut cursor) {
-        match child.kind() {
-            "kExcept" => {
-                past_except = true;
-                continue;
-            }
-            "kEnd" | ";" => continue,
-            _ if !past_except => continue,
-            _ => {}
-        }
-
-        if child.kind() == "exceptionHandler" {
-            // Process the handler body: find the statement/block after kDo
-            match walk_exception_handler_body(ctx, child, current) {
-                Some(next) => current = next,
-                None => return None,
+            if should_dispatch {
+                ctx.builder
+                    .add_edge(transfer.source, handler.entry, EdgeKind::ExceptionThrow);
+                matched = true;
             }
         }
+
+        // Unknown exceptions can match any typed handler, but a typed list is
+        // not a catch-all. Known exceptions propagate only when no matching
+        // typed handler (or catch-all) exists.
+        let unmatched = match known_type {
+            Some(_) => !matched,
+            None => !has_catch_all,
+        };
+        if unmatched {
+            output.transfers.push(transfer);
+        }
     }
 
-    Some(current)
+    for handler in handlers {
+        if let Some(handler_end) = handler.flow.normal {
+            ctx.builder
+                .add_edge(handler_end, after_block, EdgeKind::Normal);
+            output.normal = Some(after_block);
+        }
+        output.transfers.extend(handler.flow.transfers);
+    }
+
+    output
 }
 
-/// Walk the body of a single `exceptionHandler` node.
-///
-/// Structure: kOn, identifier, `:`, typeref, kDo, statement/block
-fn walk_exception_handler_body(
-    ctx: &mut BuildContext,
-    handler_node: Node,
+/// A handler body and its dispatch entry block.
+#[derive(Debug)]
+struct HandlerFlow {
+    entry: BlockId,
+    catch_all: bool,
+    exception_type: Option<String>,
+    flow: Flow,
+}
+
+fn build_except_handlers(
+    ctx: &mut BuildContext<'_>,
+    node: Node,
+    _after_block: BlockId,
+) -> Vec<HandlerFlow> {
+    let except_children = field_children(node, "except");
+    let mut handlers = Vec::new();
+
+    for child in except_children {
+        let (entry, catch_all, exception_type) = match child.kind() {
+            "exceptionHandler" => (
+                new_block(ctx, BasicBlockKind::ExceptHandler),
+                false,
+                child
+                    .child_by_field_name("exception")
+                    .map(|exception| node_text(exception, ctx.source)),
+            ),
+            "exceptionElse" | "statements" => (
+                new_block(ctx, BasicBlockKind::BareExceptHandler),
+                true,
+                None,
+            ),
+            _ => continue,
+        };
+
+        ctx.implicit_exception_depth += 1;
+        let flow = if child.kind() == "exceptionHandler" {
+            walk_field_children(ctx, child, "body", entry, false)
+        } else if child.kind() == "exceptionElse" {
+            walk_exception_else_body(ctx, child, entry)
+        } else {
+            walk_statements_node(ctx, child, entry)
+        };
+        ctx.implicit_exception_depth -= 1;
+
+        handlers.push(HandlerFlow {
+            entry,
+            catch_all,
+            exception_type,
+            flow,
+        });
+    }
+
+    if handlers.is_empty() {
+        let entry = new_block(ctx, BasicBlockKind::BareExceptHandler);
+        handlers.push(HandlerFlow {
+            entry,
+            catch_all: true,
+            exception_type: None,
+            flow: Flow::normal(entry),
+        });
+    }
+
+    handlers
+}
+
+fn walk_exception_else_body(
+    ctx: &mut BuildContext<'_>,
+    exception_else: Node,
     current: BlockId,
-) -> Option<BlockId> {
-    let mut past_do = false;
-    let mut cursor = handler_node.walk();
+) -> Flow {
+    let mut cursor = exception_else.walk();
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
 
-    for child in handler_node.children(&mut cursor) {
-        match child.kind() {
-            "kDo" => {
-                past_do = true;
-                continue;
-            }
-            _ if !past_do => continue,
-            ";" => continue,
-            _ => {}
+    for child in exception_else.children(&mut cursor) {
+        if child.kind() == "kElse" || child.kind() == ";" {
+            continue;
         }
-
-        return process_single_stmt(ctx, child, current);
+        let Some(normal) = current else {
+            break;
+        };
+        let child_flow = process_single_stmt(ctx, child, normal);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
     }
 
-    Some(current)
+    Flow {
+        normal: current,
+        transfers,
+    }
 }
 
-/// Handle a `raise` statement: adds the statement to the current block and
-/// creates an edge to the appropriate exception target.
-///
-/// If inside a try/except, routes to the except handler.
-/// If inside a try/finally, routes to the finally handler.
-/// Otherwise, routes to exit.
-fn handle_raise(ctx: &mut BuildContext, node: Node, current: BlockId) {
-    add_stmt_ref(ctx, current, node);
-    let target = exception_target(ctx);
+/// Walk the try body: the `statements` node stored in the `try` field.
+fn walk_try_body(ctx: &mut BuildContext<'_>, try_node: Node, current: BlockId) -> Flow {
+    let Some(body) = field_children(try_node, "try")
+        .into_iter()
+        .find(|child| child.kind() == "statements")
+    else {
+        return Flow::normal(current);
+    };
+
+    // The first protected statement must not share a block with statements
+    // immediately preceding the try. This prevents a handler edge from
+    // making unprotected code appear to throw into the inner handler.
+    let protected_entry = new_block(ctx, BasicBlockKind::Normal);
     ctx.builder
-        .add_edge(current, target, EdgeKind::ExceptionThrow);
+        .add_edge(current, protected_entry, EdgeKind::Normal);
+    walk_statements_node(ctx, body, protected_entry)
 }
 
-/// Determine the target block for an exception throw.
-///
-/// Walks the exception stack from innermost to outermost:
-/// - If the frame has an `except_entry`, that's the target.
-/// - If the frame has a `finally_entry`, that's the target.
-/// - Otherwise, falls through to the procedure exit block.
-fn exception_target(ctx: &BuildContext) -> BlockId {
-    for frame in ctx.exception_stack.iter().rev() {
-        if let Some(except) = frame.except_entry {
-            return except;
-        }
-        if let Some(finally) = frame.finally_entry {
-            return finally;
-        }
+/// Walk the `statements` node after `kFinally`.
+fn walk_finally_body(ctx: &mut BuildContext<'_>, try_node: Node, finally_block: BlockId) -> Flow {
+    let Some(body) = field_children(try_node, "finally")
+        .into_iter()
+        .find(|child| child.kind() == "statements")
+    else {
+        return Flow::normal(finally_block);
+    };
+
+    walk_statements_node(ctx, body, finally_block)
+}
+
+fn field_children<'tree>(node: Node<'tree>, field_name: &str) -> Vec<Node<'tree>> {
+    let mut cursor = node.walk();
+    node.children_by_field_name(field_name, &mut cursor)
+        .collect()
+}
+
+fn prepare_condition_block(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> BlockId {
+    let condition_block = prepare_statement_block(ctx, current);
+    if let Some(condition) = node.child_by_field_name("condition") {
+        let end = condition.end_byte();
+        add_stmt_ref_span(ctx, condition_block, node.kind(), node.start_byte()..end);
     }
-    ctx.exit
+    condition_block
 }
 
-/// Add a `StmtRef` for a node to a block.
-fn add_stmt_ref(ctx: &mut BuildContext, block: BlockId, node: Node) {
+fn add_loop_header_stmt(ctx: &mut BuildContext<'_>, block: BlockId, node: Node) {
+    let end = match node.kind() {
+        "while" => node.child_by_field_name("condition"),
+        "for" => node.child_by_field_name("end"),
+        _ => None,
+    };
+    if let Some(end) = end {
+        add_stmt_ref_span(ctx, block, node.kind(), node.start_byte()..end.end_byte());
+    }
+}
+
+fn add_repeat_header_stmts(ctx: &mut BuildContext<'_>, block: BlockId, node: Node) {
+    if let Some(repeat_keyword) = direct_child(node, "kRepeat") {
+        add_stmt_ref_span(
+            ctx,
+            block,
+            node.kind(),
+            repeat_keyword.start_byte()..repeat_keyword.end_byte(),
+        );
+    }
+    if let Some(condition) = node.child_by_field_name("condition") {
+        add_stmt_ref(ctx, block, condition);
+    }
+}
+
+fn direct_child<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    let child = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == kind);
+    child
+}
+
+/// Use a fresh protected block after an existing statement. Unprotected
+/// straight-line code remains coalesced into the historical body block.
+fn prepare_statement_block(ctx: &mut BuildContext<'_>, current: BlockId) -> BlockId {
+    if ctx.implicit_exception_depth == 0 || !ctx.block_has_stmt.contains(&current) {
+        return current;
+    }
+
+    let next = new_block(ctx, BasicBlockKind::Normal);
+    ctx.builder.add_edge(current, next, EdgeKind::Normal);
+    next
+}
+
+fn implicit_exception_transfers(ctx: &BuildContext<'_>, source: BlockId) -> Vec<PendingTransfer> {
+    if ctx.implicit_exception_depth == 0 {
+        Vec::new()
+    } else {
+        vec![PendingTransfer::exception(source)]
+    }
+}
+
+/// Add a source-level statement reference and remember that the block is no
+/// longer safe to reuse for another protected statement.
+fn add_stmt_ref(ctx: &mut BuildContext<'_>, block: BlockId, node: Node) {
+    add_stmt_ref_span(ctx, block, node.kind(), node.start_byte()..node.end_byte());
+}
+
+fn add_stmt_ref_span(
+    ctx: &mut BuildContext<'_>,
+    block: BlockId,
+    node_kind: &str,
+    byte_range: Range<usize>,
+) {
     ctx.builder.add_stmt(
         block,
         StmtRef {
-            byte_range: node.start_byte()..node.end_byte(),
-            node_kind: node.kind().to_string(),
+            byte_range,
+            node_kind: node_kind.to_string(),
         },
     );
+    ctx.block_has_stmt.insert(block);
 }

@@ -2,3 +2,4 @@
 Cargo.lock
 .cargo/config.toml
 /.worktrees/
+/tools/tree-sitter-cli/node_modules/

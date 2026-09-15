@@ -6,5 +6,8 @@
   "license": "MIT",
   "devDependencies": {
     "tree-sitter-cli": "0.24.7"
+  },
+  "allowScripts": {
+    "tree-sitter-cli@0.24.7": true
   }
 }

@@ -29,6 +29,7 @@ already-parsed `tree_sitter::Tree` values remain source-compatible.
 The vendored grammar starts at upstream 0.10.2. Task 1 adds only:
 
 * decimal-only label tokens for declarations, definitions, and `goto`;
+* labeled single-statement prefixes, including named and numeric labels;
 * the legacy unit `begin..end.` initialization form;
 * an optional expression on `raise`, allowing `raise;` to parse.
 
@@ -48,10 +49,31 @@ cd vendor/tree-sitter-pascal
 ../../tools/tree-sitter-cli/node_modules/.bin/tree-sitter test
 ```
 
-The last two commands must be run from `vendor/tree-sitter-pascal`, or with the
-vendored directory supplied as the command's working directory. The expected
-CLI version is `tree-sitter 0.24.7`; `npm ci` creates only ignored
-`node_modules` files. In environments where npm is unavailable, the equivalent
-reproducible check is `cargo install --locked --version 0.24.7 tree-sitter-cli`
-followed by the same `generate` and `test` commands. The committed generated
+With npm 12, the first install may block the pinned CLI's native install
+script. Approve that exact package from the tool directory, then rebuild it:
+
+```sh
+cd tools/tree-sitter-cli
+npm install-scripts approve tree-sitter-cli
+npm rebuild tree-sitter-cli
+cd ../../vendor/tree-sitter-pascal
+../../tools/tree-sitter-cli/node_modules/.bin/tree-sitter generate
+../../tools/tree-sitter-cli/node_modules/.bin/tree-sitter test
+```
+
+The approval is recorded in `tools/tree-sitter-cli/package.json` under
+`allowScripts`; `node_modules` is intentionally ignored. If npm is not
+available, install the same pinned CLI with Cargo instead:
+
+```sh
+cargo install --locked --version 0.24.7 tree-sitter-cli
+cd vendor/tree-sitter-pascal
+tree-sitter generate
+tree-sitter test
+```
+
+The `generate` and `test` commands must be run from
+`vendor/tree-sitter-pascal`, or with the vendored directory supplied as the
+command's working directory. The expected CLI version is `tree-sitter 0.24.7`;
+`npm ci` creates only ignored `node_modules` files. The committed generated
 artifacts were produced and verified with CLI 0.24.7.

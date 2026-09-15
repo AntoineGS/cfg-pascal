@@ -75,6 +75,7 @@ fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
         scope_ids,
         current_label_binding: 0,
         next_label_binding: 1,
+        label_binding_parents: vec![None],
         implicit_exception_depth: 0,
         block_has_stmt: HashSet::new(),
         label_scopes,
@@ -226,6 +227,8 @@ struct BuildContext<'a> {
     current_label_binding: LabelBindingId,
     /// Fresh namespace IDs for cloned finalizer walks.
     next_label_binding: LabelBindingId,
+    /// Enclosing label namespace for each walk, starting at the routine body.
+    label_binding_parents: Vec<Option<LabelBindingId>>,
     /// Nonzero while walking a try body, handler, or finally body.  This is
     /// intentionally independent from `cleanup_scopes`: handlers/finalizers
     /// may throw outward even though the scope whose handler they belong to
@@ -270,13 +273,9 @@ fn route_transfer(ctx: &mut BuildContext<'_>, transfer: PendingTransfer) {
             );
         }
         TransferKind::Goto => {
-            let target = transfer.target.or_else(|| {
-                transfer.target_label.as_ref().and_then(|label| {
-                    transfer.target_label_binding.and_then(|binding| {
-                        ctx.label_targets.get(&(binding, label.clone())).copied()
-                    })
-                })
-            });
+            let target = transfer
+                .target
+                .or_else(|| resolve_label_target(ctx, &transfer));
             if let Some(target) = target {
                 ctx.builder
                     .add_edge(transfer.source, target, transfer_completion_edge(&transfer));
@@ -291,6 +290,22 @@ fn route_transfer(ctx: &mut BuildContext<'_>, transfer: PendingTransfer) {
                     .add_edge(transfer.source, target, transfer_completion_edge(&transfer));
             }
         }
+    }
+}
+
+fn resolve_label_target(ctx: &BuildContext<'_>, transfer: &PendingTransfer) -> Option<BlockId> {
+    let label = transfer.target_label.as_ref()?;
+    let mut binding = transfer.target_label_binding?;
+
+    loop {
+        if let Some(target) = ctx.label_targets.get(&(binding, label.clone())) {
+            return Some(*target);
+        }
+
+        let Some(Some(parent)) = ctx.label_binding_parents.get(binding) else {
+            return None;
+        };
+        binding = *parent;
     }
 }
 
@@ -959,6 +974,7 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
         let previous_label_binding = ctx.current_label_binding;
         let label_binding = ctx.next_label_binding;
         ctx.next_label_binding += 1;
+        ctx.label_binding_parents.push(Some(previous_label_binding));
         ctx.current_label_binding = label_binding;
         let finally_flow = walk_finally_body(ctx, node, finally_block);
         ctx.current_label_binding = previous_label_binding;

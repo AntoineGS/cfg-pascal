@@ -604,6 +604,86 @@ end.
 }
 
 #[test]
+fn finally_goto_resolves_a_procedure_level_label() {
+    let source = br#"
+unit FinallyGotoProcedureLabel;
+interface
+implementation
+
+procedure FinallyGotoProcedureLabel;
+label Done;
+begin
+  try
+    Work;
+  finally
+    goto Done;
+  end;
+  Skipped;
+Done:
+  TargetBody;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "FinallyGotoProcedureLabel");
+    let label = block_with_stmt(cfg, &source, "label", "Done:");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+    assert!(gotos.len() >= 2);
+    for goto in gotos {
+        assert_eq!(
+            successors(cfg, goto),
+            vec![(label, EdgeKind::FinallyExit)],
+            "outward finalizer goto must resolve the procedure label"
+        );
+    }
+}
+
+#[test]
+fn nested_finally_goto_resolves_an_enclosing_finalizer_label() {
+    let source = br#"
+unit NestedFinallyGoto;
+interface
+implementation
+
+procedure NestedFinallyGoto;
+label Done;
+begin
+  try
+    Exit;
+  finally
+    try
+      NestedWork;
+    finally
+      goto Done;
+    end;
+Done:
+    Cleanup;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "NestedFinallyGoto");
+    let label = block_with_stmt(cfg, &source, "label", "Done:");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+    assert!(gotos.len() >= 2);
+    for goto in gotos {
+        assert_eq!(
+            successors(cfg, goto),
+            vec![(label, EdgeKind::FinallyExit)],
+            "nested finalizer goto must resolve its enclosing label"
+        );
+    }
+}
+
+#[test]
 fn cloned_cleanup_gotos_stay_in_their_own_instance() {
     let source = br#"
 unit ClonedCleanupGotos;

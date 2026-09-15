@@ -358,11 +358,13 @@ fn handle_repeat(ctx: &mut BuildContext, node: Node, current: BlockId) -> Option
 
     ctx.loop_stack.pop();
 
-    let body_final = body_end.unwrap_or(body_block);
-
-    // body -> cond_block
-    ctx.builder
-        .add_edge(body_final, cond_block, EdgeKind::Normal);
+    // A terminated body already has its abrupt successor (for example the
+    // procedure exit for `Exit` or the active exception target for `raise`).
+    // Only a body that falls through may continue to the `until` condition.
+    if let Some(body_final) = body_end {
+        ctx.builder
+            .add_edge(body_final, cond_block, EdgeKind::Normal);
+    }
 
     // Add the until condition as a statement on the cond_block
     add_stmt_ref(ctx, cond_block, node);

@@ -276,3 +276,37 @@ end.
     );
     assert!(!can_reach(cfg, exit_stmt, result_assignment));
 }
+
+#[test]
+fn terminated_repeat_body_does_not_fall_through_to_condition() {
+    let source = br#"
+unit RepeatTermination;
+interface
+implementation
+
+procedure RepeatExit;
+begin
+  repeat
+    Exit;
+  until Done;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "RepeatExit");
+
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit");
+    let repeat_condition = block_with_stmt(cfg, &source, "repeat", "repeat");
+    let after_loop = block_with_stmt(cfg, &source, "statement", "After");
+    assert_eq!(
+        successors(cfg, exit_stmt),
+        vec![(cfg.exit, EdgeKind::Normal)],
+        "a terminated repeat body must not acquire a condition fallthrough"
+    );
+    assert!(!can_reach(cfg, exit_stmt, repeat_condition));
+    assert!(!can_reach(cfg, exit_stmt, after_loop));
+}

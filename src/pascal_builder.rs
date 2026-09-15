@@ -856,18 +856,18 @@ fn handle_case(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
     }
 
     let default_children = case_default_children(node);
-    if !default_children.is_empty() {
+    if let Some(default_children) = &default_children {
         let default_block = new_block(ctx, BasicBlockKind::Normal);
         ctx.builder
             .add_edge(selector_block, default_block, EdgeKind::CaseArm);
-        let default_flow = walk_node_children(ctx, &default_children, default_block);
+        let default_flow = walk_node_children(ctx, default_children, default_block);
         if let Some(default_end) = default_flow.normal {
             normal_ends.push(default_end);
         }
         transfers.extend(default_flow.transfers);
     }
 
-    let after_block = if default_children.is_empty() || !normal_ends.is_empty() {
+    let after_block = if default_children.is_none() || !normal_ends.is_empty() {
         Some(new_block(ctx, BasicBlockKind::Normal))
     } else {
         None
@@ -877,7 +877,7 @@ fn handle_case(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
             ctx.builder
                 .add_edge(normal_end, after_block, EdgeKind::Normal);
         }
-        if default_children.is_empty() {
+        if default_children.is_none() {
             ctx.builder
                 .add_edge(selector_block, after_block, EdgeKind::CaseArm);
         }
@@ -926,18 +926,18 @@ fn case_selector<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
         !child.is_extra()
             && !matches!(
                 child.kind(),
-                "caseCase" | "kCase" | "kOf" | "kElse" | "kEnd"
+                "caseCase" | "kCase" | "kOf" | "kElse" | "kOtherwise" | "kEnd"
             )
     });
     selector
 }
 
-fn case_default_children<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
+fn case_default_children<'tree>(node: Node<'tree>) -> Option<Vec<Node<'tree>>> {
     let mut cursor = node.walk();
     let mut after_else = false;
     let mut children = Vec::new();
     for child in node.children(&mut cursor) {
-        if child.kind() == "kElse" {
+        if matches!(child.kind(), "kElse" | "kOtherwise") {
             after_else = true;
             continue;
         }
@@ -945,7 +945,7 @@ fn case_default_children<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
             children.push(child);
         }
     }
-    children
+    after_else.then_some(children)
 }
 
 fn walk_node_children(ctx: &mut BuildContext<'_>, children: &[Node<'_>], current: BlockId) -> Flow {

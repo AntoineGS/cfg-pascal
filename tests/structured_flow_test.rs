@@ -222,6 +222,46 @@ end.
 }
 
 #[test]
+fn case_otherwise_is_a_default_arm_without_a_false_no_match_path() {
+    let source = br#"
+unit CaseOtherwise;
+interface
+implementation
+
+procedure CaseOtherwise;
+begin
+  case Choice of
+    1: FirstArm;
+  otherwise
+    OtherwiseArm;
+  end;
+  AfterCase;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "CaseOtherwise");
+    let selector = block_with_stmt(cfg, &source, "case", "case Choice");
+    let first_arm = block_with_stmt(cfg, &source, "statement", "FirstArm");
+    let otherwise_arm = block_with_stmt(cfg, &source, "statement", "OtherwiseArm");
+    let after_case = block_with_stmt(cfg, &source, "statement", "AfterCase");
+
+    let selector_successors = successors(cfg, selector);
+    let case_arms: Vec<_> = selector_successors
+        .iter()
+        .filter_map(|(target, kind)| (*kind == EdgeKind::CaseArm).then_some(*target))
+        .collect();
+    assert_eq!(case_arms.len(), 2);
+    assert!(case_arms.contains(&first_arm));
+    assert!(case_arms.contains(&otherwise_arm));
+    assert!(can_reach(cfg, first_arm, after_case));
+    assert!(can_reach(cfg, otherwise_arm, after_case));
+}
+
+#[test]
 fn preprocessor_statement_blocks_are_alternatives_and_can_skip() {
     let source = br#"
 unit ConditionalStatements;

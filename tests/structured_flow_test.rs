@@ -795,6 +795,119 @@ end.
 }
 
 #[test]
+fn finally_goto_resolves_conditional_labels_in_the_containing_routine() {
+    let source = br#"
+unit FinallyRoutineConditionalLabels;
+interface
+implementation
+
+procedure FinallyRoutineConditionalLabels;
+label Done;
+begin
+  try
+    Work;
+  finally
+    goto Done;
+  end;
+  {$IFDEF A}
+  Done: First;
+  {$ELSE}
+  Done: Second;
+  {$ENDIF}
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "FinallyRoutineConditionalLabels");
+    let labels = blocks_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(labels.len(), 2);
+    let expected: HashSet<_> = labels.iter().copied().collect();
+
+    for goto in blocks_with_stmt(cfg, &source, "goto", "goto Done") {
+        let targets: HashSet<_> = successors(cfg, goto)
+            .into_iter()
+            .filter_map(|(target, kind)| {
+                (kind == EdgeKind::FinallyExit && expected.contains(&target)).then_some(target)
+            })
+            .collect();
+        assert_eq!(
+            targets, expected,
+            "a finalizer goto must resolve conditional labels in its containing routine"
+        );
+    }
+}
+
+#[test]
+fn nested_finalizer_goto_resolves_enclosing_conditional_label_clone() {
+    let source = br#"
+unit NestedEnclosingConditionalLabels;
+interface
+implementation
+
+procedure NestedEnclosingConditionalLabels;
+label Done;
+begin
+  try
+    if Flag then Exit;
+  finally
+    try
+      Work;
+    finally
+      goto Done;
+    end;
+    {$IFDEF A}
+    Done: First;
+    {$ELSE}
+    Done: Second;
+    {$ENDIF}
+    Tail;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "NestedEnclosingConditionalLabels");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+    let labels = blocks_with_stmt(cfg, &source, "label", "Done:");
+    assert_eq!(gotos.len(), 6);
+    assert_eq!(labels.len(), 6);
+
+    let expected_pairs: HashSet<Vec<BlockId>> =
+        labels.chunks_exact(2).map(|pair| pair.to_vec()).collect();
+    let mut actual_pairs = HashSet::new();
+    for goto in gotos {
+        let edges = successors(cfg, goto);
+        let mut targets: Vec<_> = edges
+            .into_iter()
+            .filter_map(|(target, _)| labels.contains(&target).then_some(target))
+            .collect();
+        targets.sort_by_key(|target| target.index());
+        assert_eq!(
+            targets.len(),
+            2,
+            "nested finalizer goto must resolve both labels in its enclosing clone"
+        );
+        actual_pairs.insert(targets);
+    }
+    assert_eq!(
+        actual_pairs, expected_pairs,
+        "nested finalizer gotos must not resolve another clone's conditional labels"
+    );
+
+    let exit = block_with_stmt(cfg, &source, "statement", "Exit");
+    let after = block_with_stmt(cfg, &source, "statement", "After");
+    assert!(!can_reach(cfg, exit, after));
+}
+
+#[test]
 fn preprocessor_statement_blocks_preserve_loop_controls_and_finally_labels() {
     let source = br#"
 unit ConditionalTransfers;

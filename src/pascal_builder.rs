@@ -643,7 +643,6 @@ fn label_target_bindings_from_namespace(
     }
 
     let source_path = preprocessor_path(ctx, start);
-    let instance = label_namespace_instance(ctx, start);
     let mut targets = Vec::new();
 
     for &prepass_binding in ctx.preprocessor_branch_info.keys() {
@@ -658,8 +657,7 @@ fn label_target_bindings_from_namespace(
         if !compatible_preprocessor_paths(&source_path, &target_path) {
             continue;
         }
-        let Some(runtime_binding) = runtime_target_binding(ctx, start, instance, prepass_binding)
-        else {
+        let Some(runtime_binding) = runtime_target_binding(ctx, start, prepass_binding) else {
             continue;
         };
         targets.push((runtime_binding, scopes));
@@ -723,13 +721,12 @@ fn compatible_preprocessor_paths(
 fn runtime_target_binding(
     ctx: &BuildContext<'_>,
     start: LabelBindingId,
-    instance: LabelBindingId,
     prepass_binding: LabelBindingId,
 ) -> Option<LabelBindingId> {
-    if instance == 0 {
-        return Some(prepass_binding);
-    }
-
+    // A target branch can belong to this namespace, an enclosing finalizer
+    // namespace, or the routine root. Never search sibling or unrelated
+    // runtime instances: those may contain the same syntactic branch but are
+    // not valid owners for this transfer.
     let mut binding = Some(start);
     while let Some(candidate) = binding {
         if ctx
@@ -743,9 +740,22 @@ fn runtime_target_binding(
     }
 
     let key = ctx.preprocessor_branch_keys.get(&prepass_binding)?;
-    ctx.preprocessor_runtime_bindings
-        .get(&(instance, *key))
-        .copied()
+    let mut instance = label_namespace_instance(ctx, start);
+    loop {
+        if instance == 0 {
+            return Some(prepass_binding);
+        }
+        if let Some(runtime_binding) = ctx.preprocessor_runtime_bindings.get(&(instance, *key)) {
+            return Some(*runtime_binding);
+        }
+
+        let parent = parent_label_binding(ctx, instance)?;
+        let enclosing_instance = label_namespace_instance(ctx, parent);
+        if enclosing_instance == instance {
+            return None;
+        }
+        instance = enclosing_instance;
+    }
 }
 
 fn runtime_preprocessor_binding(

@@ -81,6 +81,18 @@ fn source_span(source: &[u8], start_text: &str, end_text: &str) -> Range<usize> 
     start..end
 }
 
+fn source_span_through(source: &[u8], start_text: &str, end_text: &str) -> Range<usize> {
+    let source_text = std::str::from_utf8(source).expect("fixture must be UTF-8");
+    let start = source_text
+        .find(start_text)
+        .unwrap_or_else(|| panic!("start marker {start_text:?} not found"));
+    let end = source_text[start..]
+        .find(end_text)
+        .map(|offset| start + offset + end_text.len())
+        .unwrap_or_else(|| panic!("end marker {end_text:?} not found"));
+    start..end
+}
+
 #[test]
 fn nested_routines_are_collected_with_qualified_names_and_isolated_refs() {
     let source = br#"
@@ -263,4 +275,199 @@ end.
     let cfgs = build_file_cfgs(&tree, &source);
 
     assert_eq!(cfg_names(&cfgs), vec!["RealRoutine"]);
+}
+
+#[test]
+fn program_main_body_is_a_separate_scope_after_routines() {
+    let source = br#"
+program ProgramScope;
+
+procedure Helper;
+begin
+  HelperWork;
+end;
+
+begin
+  MainWork;
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    assert_eq!(cfg_names(&cfgs), vec!["Helper", "ProgramScope.<main>"]);
+
+    let helper = cfg_for(&cfgs, "Helper");
+    let main = cfg_for(&cfgs, "ProgramScope.<main>");
+    let helper_refs = statement_texts(helper, &source).join("\n");
+    let main_refs = statement_texts(main, &source).join("\n");
+    assert!(helper_refs.contains("HelperWork"));
+    assert!(!helper_refs.contains("MainWork"));
+    assert!(main_refs.contains("MainWork"));
+    assert!(!main_refs.contains("HelperWork"));
+    assert_eq!(
+        main.byte_range,
+        source_span_through(&source, "begin\n  MainWork", "end")
+    );
+}
+
+#[test]
+fn library_main_body_is_only_created_when_the_library_has_one() {
+    let source = br#"
+library LibraryScope;
+
+procedure Helper;
+begin
+  HelperWork;
+end;
+
+begin
+  LibraryWork;
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    assert_eq!(
+        cfg_names(&cfgs),
+        vec!["Helper", "LibraryScope.<main>"],
+        "a library body follows its routine definitions"
+    );
+
+    let main = cfg_for(&cfgs, "LibraryScope.<main>");
+    let refs = statement_texts(main, &source).join("\n");
+    assert!(refs.contains("LibraryWork"));
+    assert!(!refs.contains("HelperWork"));
+    assert_eq!(
+        main.byte_range,
+        source_span_through(&source, "begin\n  LibraryWork", "end")
+    );
+
+    let no_body_source = br#"
+library LibraryWithoutBody;
+
+procedure Helper;
+begin
+  HelperWork;
+end;
+
+end.
+"#
+    .to_vec();
+    let no_body_tree = parse_clean(&no_body_source);
+    let no_body_cfgs = build_file_cfgs(&no_body_tree, &no_body_source);
+    assert_eq!(cfg_names(&no_body_cfgs), vec!["Helper"]);
+}
+
+#[test]
+fn unit_initialization_and_finalization_have_independent_scopes_and_ranges() {
+    let source = br#"
+unit UnitSections;
+interface
+implementation
+
+procedure ImplementationWork;
+begin
+  ImplWork;
+end;
+
+initialization
+  InitWork;
+  InitOther;
+
+finalization
+  FinalWork;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    assert_eq!(
+        cfg_names(&cfgs),
+        vec![
+            "ImplementationWork",
+            "UnitSections.<initialization>",
+            "UnitSections.<finalization>",
+        ]
+    );
+
+    let implementation = cfg_for(&cfgs, "ImplementationWork");
+    let initialization = cfg_for(&cfgs, "UnitSections.<initialization>");
+    let finalization = cfg_for(&cfgs, "UnitSections.<finalization>");
+
+    let implementation_refs = statement_texts(implementation, &source).join("\n");
+    let initialization_refs = statement_texts(initialization, &source).join("\n");
+    let finalization_refs = statement_texts(finalization, &source).join("\n");
+    assert!(implementation_refs.contains("ImplWork"));
+    assert!(!implementation_refs.contains("InitWork"));
+    assert!(!implementation_refs.contains("FinalWork"));
+    assert!(initialization_refs.contains("InitWork"));
+    assert!(initialization_refs.contains("InitOther"));
+    assert!(!initialization_refs.contains("ImplWork"));
+    assert!(!initialization_refs.contains("FinalWork"));
+    assert!(finalization_refs.contains("FinalWork"));
+    assert!(!finalization_refs.contains("ImplWork"));
+    assert!(!finalization_refs.contains("InitWork"));
+
+    assert_eq!(
+        initialization.byte_range,
+        source_span_through(&source, "initialization", "InitOther;")
+    );
+    assert_eq!(
+        finalization.byte_range,
+        source_span_through(&source, "finalization", "FinalWork;")
+    );
+}
+
+#[test]
+fn empty_unit_sections_are_kept_but_units_without_sections_are_not_duplicated() {
+    let source = br#"
+unit EmptySections;
+interface
+implementation
+initialization
+finalization
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    assert_eq!(
+        cfg_names(&cfgs),
+        vec![
+            "EmptySections.<initialization>",
+            "EmptySections.<finalization>",
+        ]
+    );
+    let empty_initialization = cfg_for(&cfgs, "EmptySections.<initialization>");
+    assert_eq!(
+        empty_initialization.byte_range,
+        source_span_through(&source, "initialization", "initialization")
+    );
+    assert_eq!(
+        cfg_for(&cfgs, "EmptySections.<finalization>").byte_range,
+        source_span_through(&source, "finalization", "finalization")
+    );
+    assert!(
+        empty_initialization
+            .graph
+            .node_indices()
+            .all(|index| empty_initialization.graph[index].stmts.is_empty()),
+        "an empty initialization section must not borrow later section statements"
+    );
+
+    let no_sections_source = br#"
+unit NoSections;
+interface
+implementation
+end.
+"#
+    .to_vec();
+    let no_sections_tree = parse_clean(&no_sections_source);
+    let no_sections_cfgs = build_file_cfgs(&no_sections_tree, &no_sections_source);
+    assert!(no_sections_cfgs.is_empty());
 }

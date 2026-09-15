@@ -19,13 +19,27 @@ use crate::constructs::{
 /// their source spelling. A nested routine is qualified with its lexical
 /// parents, such as `Outer.Inner` or `TClass.Method.Inner`.
 ///
-/// CFGs are returned in stable lexical pre-order: each routine precedes its
-/// nested descendants, and siblings retain source order. A routine's byte
-/// range covers its complete `defProc` node, including its declaration,
-/// nested declarations, and executable body.
+/// CFGs are returned in stable lexical pre-order (equivalently, by executable
+/// scope start byte): each routine precedes its nested descendants, and
+/// siblings retain source order. A routine's byte range covers its complete
+/// `defProc` node, including its declaration, nested declarations, and
+/// executable body.
+///
+/// Programs and libraries also receive a synthetic `<module>.<main>` CFG when
+/// they contain a main `begin..end` body. Units receive one synthetic
+/// `<module>.<initialization>` or `<module>.<finalization>` CFG for each
+/// corresponding section node, including empty sections. Synthetic section
+/// ranges cover only the executable node: the main block's `begin..end` span,
+/// or the section keyword through its last statement. Module headers,
+/// declarations, and the program/library final `.` are excluded.
+/// No main CFG is emitted for a body-less library, and no unit section CFG is
+/// emitted when the corresponding section is absent.
 pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
+    let root = tree.root_node();
     let mut cfgs = Vec::new();
-    collect_def_proc_cfgs(tree.root_node(), source, None, &mut cfgs);
+    collect_def_proc_cfgs(root, source, None, &mut cfgs);
+    collect_module_cfgs(root, source, &mut cfgs);
+    cfgs.sort_by_key(|cfg| cfg.byte_range.start);
     cfgs
 }
 
@@ -63,7 +77,86 @@ fn build_proc_cfg(def_proc: Node, source: &[u8], proc_name: String) -> Option<Cf
     let block = def_proc.child_by_field_name("body")?;
 
     let byte_range = def_proc.start_byte()..def_proc.end_byte();
-    let mut builder = DefaultCfgBuilder::new(proc_name, byte_range);
+    Some(build_scope_cfg(
+        proc_name,
+        byte_range,
+        block,
+        ScopeBody::Block,
+        source,
+    ))
+}
+
+fn collect_module_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
+    let Some(module) = direct_named_child(node, ["program", "library", "unit"]) else {
+        return;
+    };
+    let Some(module_name) = extract_module_name(module, source) else {
+        return;
+    };
+
+    match module.kind() {
+        "program" | "library" => {
+            if let Some(body) = direct_child(module, "block") {
+                out.push(build_scope_cfg(
+                    format!("{module_name}.<main>"),
+                    body.start_byte()..body.end_byte(),
+                    body,
+                    ScopeBody::Block,
+                    source,
+                ));
+            }
+        }
+        "unit" => {
+            let mut cursor = module.walk();
+            for section in module.named_children(&mut cursor) {
+                let section_name = match section.kind() {
+                    "initialization" => "initialization",
+                    "finalization" => "finalization",
+                    _ => continue,
+                };
+                out.push(build_scope_cfg(
+                    format!("{module_name}.<{section_name}>"),
+                    section.start_byte()..section.end_byte(),
+                    section,
+                    ScopeBody::Section,
+                    source,
+                ));
+            }
+        }
+        _ => unreachable!("module collector only accepts module nodes"),
+    }
+}
+
+fn direct_named_child<'tree, const N: usize>(
+    node: Node<'tree>,
+    kinds: [&str; N],
+) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    let child = node
+        .named_children(&mut cursor)
+        .find(|child| kinds.contains(&child.kind()));
+    child
+}
+
+fn extract_module_name(module: Node, source: &[u8]) -> Option<String> {
+    let module_name = direct_child(module, "moduleName")?;
+    let name = node_text(module_name, source);
+    (!name.is_empty()).then_some(name)
+}
+
+enum ScopeBody {
+    Block,
+    Section,
+}
+
+fn build_scope_cfg(
+    scope_name: String,
+    byte_range: Range<usize>,
+    scope_node: Node,
+    scope_body: ScopeBody,
+    source: &[u8],
+) -> Cfg {
+    let mut builder = DefaultCfgBuilder::new(scope_name, byte_range);
 
     let entry = builder.new_block(BasicBlockKind::Entry);
     let exit = builder.new_block(BasicBlockKind::Exit);
@@ -77,7 +170,7 @@ fn build_proc_cfg(def_proc: Node, source: &[u8], proc_name: String) -> Option<Cf
     let mut scope_ids = HashMap::new();
     let mut label_scope_id = 0;
     collect_label_scopes(
-        block,
+        scope_node,
         source,
         &[],
         &mut label_scope_id,
@@ -101,10 +194,13 @@ fn build_proc_cfg(def_proc: Node, source: &[u8], proc_name: String) -> Option<Cf
         label_targets: HashMap::new(),
     };
 
-    let final_flow = walk_block_stmts(&mut ctx, block, body);
+    let final_flow = match scope_body {
+        ScopeBody::Block => walk_block_stmts(&mut ctx, scope_node, body),
+        ScopeBody::Section => walk_section_stmts(&mut ctx, scope_node, body),
+    };
     finish_flow(&mut ctx, final_flow);
 
-    Some(builder.finish())
+    builder.finish()
 }
 
 fn collect_label_scopes(
@@ -373,6 +469,36 @@ fn walk_statements_node(
 
     for child in statements_node.children(&mut cursor) {
         if child.kind() == ";" {
+            continue;
+        }
+
+        let child_flow = process_sequence_child(ctx, child, current);
+        current = child_flow.normal;
+        transfers.extend(child_flow.transfers);
+    }
+
+    Flow {
+        normal: current,
+        transfers,
+    }
+}
+
+/// Walk the statements directly contained by a unit initialization or
+/// finalization section. Those sections use an implicit `begin`, so their
+/// statement nodes are siblings of the section keyword rather than children
+/// of a `block` node.
+fn walk_section_stmts(ctx: &mut BuildContext<'_>, section: Node, current: BlockId) -> Flow {
+    let header_kind = match section.kind() {
+        "initialization" => "kInitialization",
+        "finalization" => "kFinalization",
+        _ => "",
+    };
+    let mut cursor = section.walk();
+    let mut current = Some(current);
+    let mut transfers = Vec::new();
+
+    for child in section.children(&mut cursor) {
+        if child.is_extra() || child.kind() == ";" || child.kind() == header_kind {
             continue;
         }
 

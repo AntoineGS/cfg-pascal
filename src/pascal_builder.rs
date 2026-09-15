@@ -12,35 +12,54 @@ use crate::constructs::{
     PendingTransfer, ScopeId, TransferKind,
 };
 
-/// Build CFGs for all procedure/function definitions in a parsed Pascal file.
+/// Build CFGs for all executable routine definitions in a parsed Pascal file.
 ///
-/// Walks the tree looking for `defProc` nodes, extracts the procedure name
-/// and body block, then builds a CFG for each one.
+/// Walks the tree looking for `defProc` nodes, extracts each routine name and
+/// body block, then builds a CFG for each one. Top-level routine names retain
+/// their source spelling. A nested routine is qualified with its lexical
+/// parents, such as `Outer.Inner` or `TClass.Method.Inner`.
+///
+/// CFGs are returned in stable lexical pre-order: each routine precedes its
+/// nested descendants, and siblings retain source order. A routine's byte
+/// range covers its complete `defProc` node, including its declaration,
+/// nested declarations, and executable body.
 pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
     let mut cfgs = Vec::new();
-    collect_def_proc_cfgs(tree.root_node(), source, &mut cfgs);
+    collect_def_proc_cfgs(tree.root_node(), source, None, &mut cfgs);
     cfgs
 }
 
-fn collect_def_proc_cfgs(node: Node, source: &[u8], out: &mut Vec<Cfg>) {
+fn collect_def_proc_cfgs(node: Node, source: &[u8], parent_name: Option<&str>, out: &mut Vec<Cfg>) {
     if node.kind() == "defProc" {
-        if let Some(cfg) = build_proc_cfg(node, source) {
+        let Some(local_name) = extract_proc_name(node, source) else {
+            return;
+        };
+        let proc_name = parent_name
+            .map(|parent| format!("{parent}.{local_name}"))
+            .unwrap_or(local_name);
+
+        if let Some(cfg) = build_proc_cfg(node, source, proc_name.clone()) {
             out.push(cfg);
         }
-        // Nested procedures are deliberately left for Task 4. Do not execute
-        // their bodies as part of the containing routine's CFG.
+
+        // A nested routine is a separate executable scope. Collect only the
+        // definitions stored in `local`; in particular, never recurse into
+        // the routine body while collecting descendants, or its statements
+        // would be mistaken for part of the containing routine.
+        for child in field_children(node, "local") {
+            collect_def_proc_cfgs(child, source, Some(&proc_name), out);
+        }
         return;
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_def_proc_cfgs(child, source, out);
+        collect_def_proc_cfgs(child, source, parent_name, out);
     }
 }
 
 /// Build a CFG for a single `defProc` node.
-fn build_proc_cfg(def_proc: Node, source: &[u8]) -> Option<Cfg> {
-    let proc_name = extract_proc_name(def_proc, source)?;
+fn build_proc_cfg(def_proc: Node, source: &[u8], proc_name: String) -> Option<Cfg> {
     let block = def_proc.child_by_field_name("body")?;
 
     let byte_range = def_proc.start_byte()..def_proc.end_byte();

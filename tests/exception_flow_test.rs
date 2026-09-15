@@ -51,13 +51,10 @@ fn blocks_containing_text(cfg: &Cfg, source: &[u8], text: &str) -> Vec<BlockId> 
     cfg.graph
         .node_indices()
         .filter(|&index| {
-            cfg.graph[index]
-                .stmts
-                .iter()
-                .any(|stmt| {
-                    std::str::from_utf8(&source[stmt.byte_range.clone()])
-                        .is_ok_and(|stmt_text| stmt_text.contains(text))
-                })
+            cfg.graph[index].stmts.iter().any(|stmt| {
+                std::str::from_utf8(&source[stmt.byte_range.clone()])
+                    .is_ok_and(|stmt_text| stmt_text.contains(text))
+            })
         })
         .map(BlockId::from)
         .collect()
@@ -748,8 +745,9 @@ end.
     assert!(successors(cfg, inner_cleanup).contains(&(condition, EdgeKind::FinallyExit)));
     assert!(successors(cfg, inner_cleanup)
         .iter()
-        .all(|(target, kind)| !(*kind == EdgeKind::FinallyEntry
-            && outer_cleanups.contains(target))));
+        .all(
+            |(target, kind)| !(*kind == EdgeKind::FinallyEntry && outer_cleanups.contains(target))
+        ));
 }
 
 #[test]

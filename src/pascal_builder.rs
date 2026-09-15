@@ -1176,9 +1176,7 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
 
         let key = match &input {
             FinalizerInput::Normal(_) => ctx.active_finalizer_continuation.clone(),
-            FinalizerInput::Transfer(transfer) => {
-                Some(ContinuationKey::from_transfer(transfer))
-            }
+            FinalizerInput::Transfer(transfer) => Some(ContinuationKey::from_transfer(transfer)),
         };
         if let Some(group) = groups
             .iter_mut()
@@ -1195,12 +1193,8 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
 
     for group in groups {
         let is_normal = group.key.is_none();
-        let (finally_block, finally_flow) = walk_or_reuse_finally_body(
-            ctx,
-            node,
-            scope_id,
-            group.key.as_ref(),
-        );
+        let (finally_block, finally_flow) =
+            walk_or_reuse_finally_body(ctx, node, scope_id, group.key.as_ref());
         for input in &group.inputs {
             let (source, entry_edge) = match input {
                 FinalizerInput::Normal(source) => (*source, EdgeKind::FinallyEntry),
@@ -1230,9 +1224,7 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
                 // remains pending for outer cleanup scopes.
                 output.transfers.push(transfer.with_source(finally_end));
             } else if let Some(key) = group.key.as_ref() {
-                output
-                    .transfers
-                    .push(key.transfer_from_source(finally_end));
+                output.transfers.push(key.transfer_from_source(finally_end));
             }
         }
 
@@ -1275,8 +1267,7 @@ fn walk_or_reuse_finally_body(
             })
             .collect(),
         implicit_exception_depth: ctx.implicit_exception_depth,
-        label_binding: finally_body_contains_goto(node)
-            .then_some(ctx.current_label_binding),
+        label_binding: finally_body_contains_goto(node).then_some(ctx.current_label_binding),
     });
 
     if let Some(cache_key) = &cache_key {

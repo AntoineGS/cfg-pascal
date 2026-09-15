@@ -29,7 +29,7 @@ fn cfg_for<'a>(cfgs: &'a [Cfg], name: &str) -> &'a Cfg {
         })
 }
 
-fn block_with_stmt<'a>(cfg: &'a Cfg, source: &[u8], kind: &str, text: &str) -> BlockId {
+fn block_with_stmt(cfg: &Cfg, source: &[u8], kind: &str, text: &str) -> BlockId {
     cfg.graph
         .node_indices()
         .find_map(|index| {
@@ -155,12 +155,7 @@ end.
 
     let nested_cfg = cfg_for(&cfgs, "NestedBranchBreak");
     let nested_break = block_with_stmt(nested_cfg, &source, "statement", "Break");
-    let inner_condition = block_with_stmt(
-        nested_cfg,
-        &source,
-        "for",
-        "for Inner := 0 to 10",
-    );
+    let inner_condition = block_with_stmt(nested_cfg, &source, "for", "for Inner := 0 to 10");
     let inner_after = target_of(nested_cfg, inner_condition, EdgeKind::LoopExit);
     let outer_condition = block_with_stmt(nested_cfg, &source, "while", "while Outer < 10");
     assert_eq!(
@@ -362,12 +357,8 @@ end.
 
     let continue_cfg = cfg_for(&cfgs, "ParenthesizedContinue");
     let continue_stmt = block_with_stmt(continue_cfg, &source, "statement", "Continue()");
-    let continue_condition = block_with_stmt(
-        continue_cfg,
-        &source,
-        "while",
-        "while ContinueCondition",
-    );
+    let continue_condition =
+        block_with_stmt(continue_cfg, &source, "while", "while ContinueCondition");
     assert_eq!(
         successors(continue_cfg, continue_stmt),
         vec![(continue_condition, EdgeKind::Normal)],

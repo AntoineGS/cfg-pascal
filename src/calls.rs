@@ -47,36 +47,140 @@ pub struct TransactionMethodEntry {
 /// Dictionary of known transaction types and methods across Delphi frameworks.
 pub const TRANSACTION_METHODS: &[TransactionMethodEntry] = &[
     // IBX (InterBase Express)
-    TransactionMethodEntry { type_name: "TIBTransaction", method_name: "StartTransaction", op: TransactionOp::Start },
-    TransactionMethodEntry { type_name: "TIBTransaction", method_name: "Commit", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "TIBTransaction", method_name: "CommitRetaining", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "TIBTransaction", method_name: "Rollback", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "TIBTransaction", method_name: "RollbackRetaining", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "TIBTransaction", method_name: "InTransaction", op: TransactionOp::InTransaction },
+    TransactionMethodEntry {
+        type_name: "TIBTransaction",
+        method_name: "StartTransaction",
+        op: TransactionOp::Start,
+    },
+    TransactionMethodEntry {
+        type_name: "TIBTransaction",
+        method_name: "Commit",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "TIBTransaction",
+        method_name: "CommitRetaining",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "TIBTransaction",
+        method_name: "Rollback",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "TIBTransaction",
+        method_name: "RollbackRetaining",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "TIBTransaction",
+        method_name: "InTransaction",
+        op: TransactionOp::InTransaction,
+    },
     // BDE (Borland Database Engine)
-    TransactionMethodEntry { type_name: "TDatabase", method_name: "StartTransaction", op: TransactionOp::Start },
-    TransactionMethodEntry { type_name: "TDatabase", method_name: "Commit", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "TDatabase", method_name: "Rollback", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "TDatabase", method_name: "InTransaction", op: TransactionOp::InTransaction },
+    TransactionMethodEntry {
+        type_name: "TDatabase",
+        method_name: "StartTransaction",
+        op: TransactionOp::Start,
+    },
+    TransactionMethodEntry {
+        type_name: "TDatabase",
+        method_name: "Commit",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "TDatabase",
+        method_name: "Rollback",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "TDatabase",
+        method_name: "InTransaction",
+        op: TransactionOp::InTransaction,
+    },
     // ADO
-    TransactionMethodEntry { type_name: "TADOConnection", method_name: "BeginTrans", op: TransactionOp::Start },
-    TransactionMethodEntry { type_name: "TADOConnection", method_name: "CommitTrans", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "TADOConnection", method_name: "RollbackTrans", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "TADOConnection", method_name: "InTransaction", op: TransactionOp::InTransaction },
+    TransactionMethodEntry {
+        type_name: "TADOConnection",
+        method_name: "BeginTrans",
+        op: TransactionOp::Start,
+    },
+    TransactionMethodEntry {
+        type_name: "TADOConnection",
+        method_name: "CommitTrans",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "TADOConnection",
+        method_name: "RollbackTrans",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "TADOConnection",
+        method_name: "InTransaction",
+        op: TransactionOp::InTransaction,
+    },
     // FireDAC
-    TransactionMethodEntry { type_name: "TFDConnection", method_name: "StartTransaction", op: TransactionOp::Start },
-    TransactionMethodEntry { type_name: "TFDConnection", method_name: "Commit", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "TFDConnection", method_name: "Rollback", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "TFDConnection", method_name: "InTransaction", op: TransactionOp::InTransaction },
+    TransactionMethodEntry {
+        type_name: "TFDConnection",
+        method_name: "StartTransaction",
+        op: TransactionOp::Start,
+    },
+    TransactionMethodEntry {
+        type_name: "TFDConnection",
+        method_name: "Commit",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "TFDConnection",
+        method_name: "Rollback",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "TFDConnection",
+        method_name: "InTransaction",
+        op: TransactionOp::InTransaction,
+    },
     // mORMot2
-    TransactionMethodEntry { type_name: "TRest", method_name: "TransactionBegin", op: TransactionOp::Start },
-    TransactionMethodEntry { type_name: "TRest", method_name: "Commit", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "TRest", method_name: "RollbackTrans", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "TRest", method_name: "InTransaction", op: TransactionOp::InTransaction },
-    TransactionMethodEntry { type_name: "IRestOrm", method_name: "TransactionBegin", op: TransactionOp::Start },
-    TransactionMethodEntry { type_name: "IRestOrm", method_name: "Commit", op: TransactionOp::Commit },
-    TransactionMethodEntry { type_name: "IRestOrm", method_name: "RollbackTrans", op: TransactionOp::Rollback },
-    TransactionMethodEntry { type_name: "IRestOrm", method_name: "InTransaction", op: TransactionOp::InTransaction },
+    TransactionMethodEntry {
+        type_name: "TRest",
+        method_name: "TransactionBegin",
+        op: TransactionOp::Start,
+    },
+    TransactionMethodEntry {
+        type_name: "TRest",
+        method_name: "Commit",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "TRest",
+        method_name: "RollbackTrans",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "TRest",
+        method_name: "InTransaction",
+        op: TransactionOp::InTransaction,
+    },
+    TransactionMethodEntry {
+        type_name: "IRestOrm",
+        method_name: "TransactionBegin",
+        op: TransactionOp::Start,
+    },
+    TransactionMethodEntry {
+        type_name: "IRestOrm",
+        method_name: "Commit",
+        op: TransactionOp::Commit,
+    },
+    TransactionMethodEntry {
+        type_name: "IRestOrm",
+        method_name: "RollbackTrans",
+        op: TransactionOp::Rollback,
+    },
+    TransactionMethodEntry {
+        type_name: "IRestOrm",
+        method_name: "InTransaction",
+        op: TransactionOp::InTransaction,
+    },
 ];
 
 /// Find all dictionary entries matching a method name (case-insensitive).
@@ -340,7 +444,9 @@ mod tests {
     fn lookup_ibx_start_transaction() {
         let entries = lookup_transaction_method("StartTransaction");
         assert!(
-            entries.iter().any(|e| e.type_name == "TIBTransaction" && e.op == TransactionOp::Start),
+            entries
+                .iter()
+                .any(|e| e.type_name == "TIBTransaction" && e.op == TransactionOp::Start),
             "Should find TIBTransaction.StartTransaction"
         );
     }
@@ -349,7 +455,9 @@ mod tests {
     fn lookup_ado_begin_trans() {
         let entries = lookup_transaction_method("BeginTrans");
         assert!(
-            entries.iter().any(|e| e.type_name == "TADOConnection" && e.op == TransactionOp::Start),
+            entries
+                .iter()
+                .any(|e| e.type_name == "TADOConnection" && e.op == TransactionOp::Start),
             "Should find TADOConnection.BeginTrans"
         );
     }
@@ -371,6 +479,9 @@ mod tests {
         let entries = lookup_transaction_method("Commit");
         let type_names: Vec<&str> = entries.iter().map(|e| e.type_name).collect();
         assert!(type_names.contains(&"TIBTransaction"), "Should include IBX");
-        assert!(type_names.contains(&"TFDConnection"), "Should include FireDAC");
+        assert!(
+            type_names.contains(&"TFDConnection"),
+            "Should include FireDAC"
+        );
     }
 }

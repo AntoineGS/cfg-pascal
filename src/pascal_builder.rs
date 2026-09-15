@@ -216,24 +216,16 @@ fn build_scope_cfg(
     let body = builder.new_block(BasicBlockKind::Normal);
     builder.add_edge(entry, body, EdgeKind::Normal);
 
-    let mut label_scopes = HashMap::new();
-    let mut scope_ids = HashMap::new();
-    let mut label_scope_id = 0;
-    let mut preprocessor_branch_bindings = HashMap::new();
-    let mut label_binding_parents = vec![None];
-    let mut next_label_binding = 1;
-    collect_label_scopes(
-        scope_node,
-        source,
-        &[],
-        0,
-        &mut label_scope_id,
-        &mut scope_ids,
-        &mut label_scopes,
-        &mut preprocessor_branch_bindings,
-        &mut label_binding_parents,
-        &mut next_label_binding,
-    );
+    let mut label_prepass = LabelScopePrepass::new(source);
+    label_prepass.collect(scope_node, &[], 0);
+    let LabelScopePrepass {
+        scope_ids,
+        label_scopes,
+        preprocessor_branch_bindings,
+        label_binding_parents,
+        next_label_binding,
+        ..
+    } = label_prepass;
 
     let mut ctx = BuildContext {
         builder: &mut builder,
@@ -270,120 +262,95 @@ fn build_scope_cfg(
     builder.finish()
 }
 
-fn collect_label_scopes(
-    node: Node,
-    source: &[u8],
-    active_scopes: &[ScopeId],
-    current_label_binding: LabelBindingId,
-    next_scope_id: &mut ScopeId,
-    scope_ids: &mut HashMap<(usize, usize), ScopeId>,
-    labels: &mut HashMap<(LabelBindingId, String), Vec<ScopeId>>,
-    preprocessor_branch_bindings: &mut HashMap<PreprocessorBranchKey, LabelBindingId>,
-    label_binding_parents: &mut Vec<Option<LabelBindingId>>,
-    next_label_binding: &mut LabelBindingId,
-) {
-    if node.kind() == "defProc" {
-        return;
+struct LabelScopePrepass<'a> {
+    source: &'a [u8],
+    next_scope_id: ScopeId,
+    scope_ids: HashMap<(usize, usize), ScopeId>,
+    label_scopes: HashMap<(LabelBindingId, String), Vec<ScopeId>>,
+    preprocessor_branch_bindings: HashMap<PreprocessorBranchKey, LabelBindingId>,
+    label_binding_parents: Vec<Option<LabelBindingId>>,
+    next_label_binding: LabelBindingId,
+}
+
+impl<'a> LabelScopePrepass<'a> {
+    fn new(source: &'a [u8]) -> Self {
+        Self {
+            source,
+            next_scope_id: 0,
+            scope_ids: HashMap::new(),
+            label_scopes: HashMap::new(),
+            preprocessor_branch_bindings: HashMap::new(),
+            label_binding_parents: vec![None],
+            next_label_binding: 1,
+        }
     }
 
-    if node.kind() == "ppBlock" {
-        let (branches, has_else) = preprocessor_branches(node, source);
-        if branches.iter().all(Vec::is_empty) && !has_else {
+    fn collect(
+        &mut self,
+        node: Node,
+        active_scopes: &[ScopeId],
+        current_label_binding: LabelBindingId,
+    ) {
+        if node.kind() == "defProc" {
             return;
         }
 
-        for (index, branch) in branches.into_iter().enumerate() {
-            let branch_binding = *next_label_binding;
-            *next_label_binding += 1;
-            label_binding_parents.push(Some(current_label_binding));
-            preprocessor_branch_bindings
-                .insert((node.start_byte(), node.end_byte(), index), branch_binding);
+        if node.kind() == "ppBlock" {
+            let (branches, has_else) = preprocessor_branches(node, self.source);
+            if branches.iter().all(Vec::is_empty) && !has_else {
+                return;
+            }
 
-            for child in branch {
-                collect_label_scopes(
-                    child,
-                    source,
-                    active_scopes,
-                    branch_binding,
-                    next_scope_id,
-                    scope_ids,
-                    labels,
-                    preprocessor_branch_bindings,
-                    label_binding_parents,
-                    next_label_binding,
+            for (index, branch) in branches.into_iter().enumerate() {
+                let branch_binding = self.next_label_binding;
+                self.next_label_binding += 1;
+                self.label_binding_parents.push(Some(current_label_binding));
+                self.preprocessor_branch_bindings
+                    .insert((node.start_byte(), node.end_byte(), index), branch_binding);
+
+                for child in branch {
+                    self.collect(child, active_scopes, branch_binding);
+                }
+            }
+            return;
+        }
+
+        if node.kind() == "label" {
+            if let Some(identifier) = label_name_node(node) {
+                self.label_scopes.insert(
+                    (
+                        current_label_binding,
+                        normalize_label_name(node_text(identifier, self.source)),
+                    ),
+                    active_scopes.to_vec(),
                 );
             }
+            return;
         }
-        return;
-    }
 
-    if node.kind() == "label" {
-        if let Some(identifier) = label_name_node(node) {
-            labels.insert(
-                (
-                    current_label_binding,
-                    normalize_label_name(node_text(identifier, source)),
-                ),
-                active_scopes.to_vec(),
-            );
-        }
-        return;
-    }
+        if node.kind() == "try" && try_has_finally(node) {
+            let scope_id = self.next_scope_id;
+            self.next_scope_id += 1;
+            self.scope_ids
+                .insert((node.start_byte(), node.end_byte()), scope_id);
+            let mut try_scopes = active_scopes.to_vec();
+            try_scopes.push(scope_id);
 
-    if node.kind() == "try" && try_has_finally(node) {
-        let scope_id = *next_scope_id;
-        *next_scope_id += 1;
-        scope_ids.insert((node.start_byte(), node.end_byte()), scope_id);
-        let mut try_scopes = active_scopes.to_vec();
-        try_scopes.push(scope_id);
-
-        for child in field_children(node, "try") {
-            collect_label_scopes(
-                child,
-                source,
-                &try_scopes,
-                current_label_binding,
-                next_scope_id,
-                scope_ids,
-                labels,
-                preprocessor_branch_bindings,
-                label_binding_parents,
-                next_label_binding,
-            );
-        }
-        for field in ["except", "finally"] {
-            for child in field_children(node, field) {
-                collect_label_scopes(
-                    child,
-                    source,
-                    active_scopes,
-                    current_label_binding,
-                    next_scope_id,
-                    scope_ids,
-                    labels,
-                    preprocessor_branch_bindings,
-                    label_binding_parents,
-                    next_label_binding,
-                );
+            for child in field_children(node, "try") {
+                self.collect(child, &try_scopes, current_label_binding);
             }
+            for field in ["except", "finally"] {
+                for child in field_children(node, field) {
+                    self.collect(child, active_scopes, current_label_binding);
+                }
+            }
+            return;
         }
-        return;
-    }
 
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_label_scopes(
-            child,
-            source,
-            active_scopes,
-            current_label_binding,
-            next_scope_id,
-            scope_ids,
-            labels,
-            preprocessor_branch_bindings,
-            label_binding_parents,
-            next_label_binding,
-        );
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.collect(child, active_scopes, current_label_binding);
+        }
     }
 }
 

@@ -8,4 +8,4 @@ license = "MIT"
 [dependencies]
 cfg-core = { git = "https://github.com/AntoineGS/cfg-core.git" }
 tree-sitter = "0.24"
-tree-sitter-pascal = "0.10"
+tree-sitter-pascal = { path = "vendor/tree-sitter-pascal" }

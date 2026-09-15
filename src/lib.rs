@@ -1,4 +1,5 @@
 pub use cfg_core;
+pub use tree_sitter_pascal::LANGUAGE;
 
 pub mod calls;
 pub(crate) mod constructs;

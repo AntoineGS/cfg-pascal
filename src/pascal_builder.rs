@@ -34,6 +34,11 @@ use crate::constructs::{
 /// declarations, and the program/library final `.` are excluded.
 /// No main CFG is emitted for a body-less library, and no unit section CFG is
 /// emitted when the corresponding section is absent.
+///
+/// The pinned `tree-sitter-pascal` 0.10.2 grammar does not parse numeric labels
+/// or the legacy unit `begin..end` initialization form cleanly. Those valid
+/// Pascal forms produce an `ERROR` root in that parser and are outside this
+/// builder's supported parse-clean input.
 pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
     let root = tree.root_node();
     let mut cfgs = Vec::new();
@@ -43,16 +48,26 @@ pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
     cfgs
 }
 
-fn collect_def_proc_cfgs(node: Node, source: &[u8], parent_name: Option<&str>, out: &mut Vec<Cfg>) {
+fn collect_def_proc_cfgs(
+    node: Node,
+    source: &[u8],
+    parent_qualified_name: Option<&str>,
+    out: &mut Vec<Cfg>,
+) {
     if node.kind() == "defProc" {
         let Some(local_name) = extract_proc_name(node, source) else {
             return;
         };
-        let proc_name = parent_name
-            .map(|parent| format!("{parent}.{local_name}"))
+        let full_local_name =
+            extract_full_proc_name(node, source).unwrap_or_else(|| local_name.clone());
+        let qualified_name = parent_qualified_name
+            .map(|parent| format!("{parent}.{full_local_name}"))
+            .unwrap_or_else(|| full_local_name.clone());
+        let proc_name = parent_qualified_name
+            .map(|_| qualified_name.clone())
             .unwrap_or(local_name);
 
-        if let Some(cfg) = build_proc_cfg(node, source, proc_name.clone()) {
+        if let Some(cfg) = build_proc_cfg(node, source, proc_name) {
             out.push(cfg);
         }
 
@@ -61,14 +76,14 @@ fn collect_def_proc_cfgs(node: Node, source: &[u8], parent_name: Option<&str>, o
         // the routine body while collecting descendants, or its statements
         // would be mistaken for part of the containing routine.
         for child in field_children(node, "local") {
-            collect_def_proc_cfgs(child, source, Some(&proc_name), out);
+            collect_def_proc_cfgs(child, source, Some(&qualified_name), out);
         }
         return;
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_def_proc_cfgs(child, source, parent_name, out);
+        collect_def_proc_cfgs(child, source, parent_qualified_name, out);
     }
 }
 
@@ -273,20 +288,35 @@ fn normalize_label_name(name: String) -> String {
     name.to_ascii_lowercase()
 }
 
+fn proc_header<'tree>(def_proc: Node<'tree>) -> Option<Node<'tree>> {
+    if let Some(header) = def_proc.child_by_field_name("header") {
+        return Some(header);
+    }
+
+    let mut cursor = def_proc.walk();
+    let header = def_proc
+        .children(&mut cursor)
+        .find(|child| child.kind() == "declProc");
+    header
+}
+
+/// Extract the complete lexical procedure/function name from a `defProc` node.
+///
+/// Unlike [`extract_proc_name`], this preserves every nested `genericDot`
+/// component and generic argument for qualification of descendants.
+fn extract_full_proc_name(def_proc: Node, source: &[u8]) -> Option<String> {
+    let header = proc_header(def_proc)?;
+    let name_node = header.child_by_field_name("name")?;
+    let name = node_text(name_node, source);
+    (!name.is_empty()).then_some(name)
+}
+
 /// Extract the procedure/function name from a `defProc` node.
 ///
 /// For standalone procedures: `declProc > identifier`
 /// For methods: `declProc > genericDot > identifier, identifier`
 fn extract_proc_name(def_proc: Node, source: &[u8]) -> Option<String> {
-    let decl_proc = if let Some(header) = def_proc.child_by_field_name("header") {
-        header
-    } else {
-        let mut cursor = def_proc.walk();
-        let found = def_proc
-            .children(&mut cursor)
-            .find(|c| c.kind() == "declProc");
-        found?
-    };
+    let decl_proc = proc_header(def_proc)?;
 
     // Try genericDot first (for method implementations like TClass.Method)
     let mut cursor = decl_proc.walk();

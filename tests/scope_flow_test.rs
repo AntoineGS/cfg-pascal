@@ -278,6 +278,87 @@ end.
 }
 
 #[test]
+fn generic_owner_names_distinguish_same_named_nested_routines() {
+    let source = br#"
+unit GenericOwners;
+interface
+implementation
+
+procedure TFirst<T>.Run;
+  procedure Local;
+  begin
+    FirstLocalWork;
+  end;
+begin
+  FirstRunWork;
+end;
+
+procedure TSecond<T>.Run;
+  procedure Local;
+  begin
+    SecondLocalWork;
+  end;
+begin
+  SecondRunWork;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    assert_eq!(
+        cfg_names(&cfgs),
+        vec!["Run", "TFirst<T>.Run.Local", "Run", "TSecond<T>.Run.Local"],
+        "top-level generic names retain their existing spelling while nested names stay unique"
+    );
+
+    let first_local = cfg_for(&cfgs, "TFirst<T>.Run.Local");
+    let second_local = cfg_for(&cfgs, "TSecond<T>.Run.Local");
+    let first_refs = statement_texts(first_local, &source).join("\n");
+    let second_refs = statement_texts(second_local, &source).join("\n");
+    assert!(first_refs.contains("FirstLocalWork"));
+    assert!(!first_refs.contains("SecondLocalWork"));
+    assert!(second_refs.contains("SecondLocalWork"));
+    assert!(!second_refs.contains("FirstLocalWork"));
+}
+
+#[test]
+fn multipart_owner_names_are_complete_for_nested_routines() {
+    let source = br#"
+unit MultipartOwners;
+interface
+implementation
+
+procedure NS.TClass.Method;
+  procedure Local;
+  begin
+    NamespaceLocalWork;
+  end;
+begin
+  NamespaceMethodWork;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    assert_eq!(
+        cfg_names(&cfgs),
+        vec!["Method", "NS.TClass.Method.Local"],
+        "the existing top-level method name remains truncated while nested qualification is complete"
+    );
+
+    let local = cfg_for(&cfgs, "NS.TClass.Method.Local");
+    let refs = statement_texts(local, &source).join("\n");
+    assert!(refs.contains("NamespaceLocalWork"));
+    assert!(!refs.contains("NamespaceMethodWork"));
+}
+
+#[test]
 fn program_main_body_is_a_separate_scope_after_routines() {
     let source = br#"
 program ProgramScope;

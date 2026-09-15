@@ -451,6 +451,10 @@ fn handle_repeat(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Fl
 
 /// Process a single statement node in any syntactic context.
 fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId) -> Flow {
+    if child.is_extra() {
+        return Flow::normal(current);
+    }
+
     match child.kind() {
         "block" => walk_block_stmts(ctx, child, current),
         "statements" => walk_statements_node(ctx, child, current),

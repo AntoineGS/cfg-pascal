@@ -488,6 +488,42 @@ end.
 }
 
 #[test]
+fn comments_inside_try_do_not_create_executable_fallthrough() {
+    let source = br#"
+unit CommentInsideTry;
+interface
+implementation
+
+procedure CommentInsideTry;
+begin
+  try
+  begin
+    { this comment is not an executable statement }
+    Exit;
+  end
+  except
+    Caught;
+  end;
+  After;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "CommentInsideTry");
+    let exit_stmt = block_with_stmt(cfg, &source, "statement", "Exit;");
+    let after = block_with_stmt(cfg, &source, "statement", "After");
+
+    assert!(!can_reach(cfg, exit_stmt, after));
+    assert!(
+        blocks_with_stmt(cfg, &source, "comment", "this comment").is_empty(),
+        "comments must not become executable statement references"
+    );
+}
+
+#[test]
 fn plain_except_and_exception_else_walk_all_handler_statements() {
     let source = br#"
 unit BareHandlers;

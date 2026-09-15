@@ -571,10 +571,14 @@ end.
     let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise TShadowedCreate.Create");
     let base = block_with_stmt(cfg, &source, "statement", "HandleBase");
     let shadowed = block_with_stmt(cfg, &source, "statement", "HandleShadowed");
+    let successful_raise = successful_raise_block(cfg, raise_stmt);
 
     assert!(successors(cfg, raise_stmt).contains(&(base, EdgeKind::ExceptionThrow)));
     assert!(successors(cfg, raise_stmt).contains(&(shadowed, EdgeKind::ExceptionThrow)));
     assert!(successors(cfg, raise_stmt).contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, successful_raise).contains(&(base, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, successful_raise).contains(&(shadowed, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, successful_raise).contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
 }
 
 #[test]

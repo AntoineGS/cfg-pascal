@@ -1012,6 +1012,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
     }
 
     match child.kind() {
+        "ppBlock" => handle_preprocessor_block(ctx, child, current),
         "labeledStatement" | "labeledStatementTr" => walk_labeled_statement(ctx, child, current),
         "block" => walk_block_stmts(ctx, child, current),
         "statements" => walk_statements_node(ctx, child, current),
@@ -1124,6 +1125,75 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
             }
         }
     }
+}
+
+/// Walk an unknown preprocessor conditional as mutually exclusive CFG
+/// alternatives.  The parser deliberately does not evaluate project defines,
+/// so every branch is possible; a conditional without an `else` also retains
+/// the path where none of its statements are compiled.
+fn handle_preprocessor_block(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let mut branches = vec![Vec::new()];
+    let mut has_else = false;
+    let mut cursor = node.walk();
+
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "ppIf" | "ppEndIf" | "ppDirective" | "ppText" => continue,
+            "ppElse" => {
+                has_else = true;
+                branches.push(Vec::new());
+            }
+            ";" | "," => continue,
+            _ => branches
+                .last_mut()
+                .expect("preprocessor branch list always has a first branch")
+                .push(child),
+        }
+    }
+
+    if branches.iter().all(Vec::is_empty) && !has_else {
+        return Flow::normal(current);
+    }
+
+    let mut normal_ends = Vec::new();
+    let mut transfers = Vec::new();
+
+    for (index, branch) in branches.iter().enumerate() {
+        let branch_entry = new_block(ctx, BasicBlockKind::Normal);
+        let edge_kind = if index == 0 {
+            EdgeKind::ConditionalTrue
+        } else {
+            EdgeKind::ConditionalFalse
+        };
+        ctx.builder.add_edge(current, branch_entry, edge_kind);
+
+        let branch_flow = walk_node_children(ctx, branch, branch_entry);
+        if let Some(branch_end) = branch_flow.normal {
+            normal_ends.push(branch_end);
+        }
+        transfers.extend(branch_flow.transfers);
+    }
+
+    // The no-branch path is connected directly to the join below with a
+    // ConditionalFalse edge. It is not an executable branch and must not
+    // receive a synthetic statement block.
+    let normal = if normal_ends.is_empty() && has_else {
+        None
+    } else {
+        let join = new_block(ctx, BasicBlockKind::Normal);
+        for normal_end in normal_ends {
+            if normal_end != join {
+                ctx.builder.add_edge(normal_end, join, EdgeKind::Normal);
+            }
+        }
+        if !has_else {
+            ctx.builder
+                .add_edge(current, join, EdgeKind::ConditionalFalse);
+        }
+        Some(join)
+    };
+
+    Flow { normal, transfers }
 }
 
 fn walk_labeled_statement(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {

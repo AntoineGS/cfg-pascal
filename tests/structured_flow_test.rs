@@ -222,6 +222,183 @@ end.
 }
 
 #[test]
+fn preprocessor_statement_blocks_are_alternatives_and_can_skip() {
+    let source = br#"
+unit ConditionalStatements;
+interface
+implementation
+
+procedure ConditionalRaise;
+begin
+  try
+    {$IFDEF FIRST}
+    raise FirstError;
+    {$ELSE}
+    raise SecondError;
+    {$ENDIF}
+  except
+    HandleRaise;
+  end;
+end;
+
+procedure ConditionalSkip;
+begin
+  BeforeSkip;
+  {$IFDEF FIRST}
+  BranchWork;
+  {$ENDIF}
+  AfterSkip;
+end;
+
+procedure NestedConditional;
+begin
+  {$IFDEF OUTER}
+  {$IFDEF INNER}
+  NestedWork;
+  {$ENDIF}
+  {$ELSE}
+  OtherWork;
+  {$ENDIF}
+  AfterNested;
+end;
+
+initialization
+  {$IFDEF INIT}
+  InitFirst;
+  {$ELSE}
+  InitSecond;
+  {$ENDIF}
+  InitAfter;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let raise_cfg = cfg_for(&cfgs, "ConditionalRaise");
+    let first_raise = block_with_stmt(raise_cfg, &source, "raise", "raise FirstError");
+    let second_raise = block_with_stmt(raise_cfg, &source, "raise", "raise SecondError");
+    let raise_handler = block_with_stmt(raise_cfg, &source, "statement", "HandleRaise");
+    assert!(successors(raise_cfg, first_raise).contains(&(raise_handler, EdgeKind::ExceptionThrow)));
+    assert!(
+        successors(raise_cfg, second_raise).contains(&(raise_handler, EdgeKind::ExceptionThrow))
+    );
+    assert!(!can_reach(raise_cfg, first_raise, second_raise));
+    assert!(!can_reach(raise_cfg, second_raise, first_raise));
+    assert!(
+        raise_cfg
+            .graph
+            .node_indices()
+            .flat_map(|index| raise_cfg.graph[index].stmts.iter())
+            .all(|stmt| !stmt.node_kind.starts_with("pp")),
+        "preprocessor directives are syntax controls, not executable statement references"
+    );
+
+    let skip_cfg = cfg_for(&cfgs, "ConditionalSkip");
+    let before_skip = block_with_stmt(skip_cfg, &source, "statement", "BeforeSkip");
+    let branch_work = block_with_stmt(skip_cfg, &source, "statement", "BranchWork");
+    let after_skip = block_with_stmt(skip_cfg, &source, "statement", "AfterSkip");
+    let before_successors = successors(skip_cfg, before_skip);
+    assert!(before_successors
+        .iter()
+        .any(|(_, kind)| *kind == EdgeKind::ConditionalTrue));
+    assert!(before_successors
+        .iter()
+        .any(|(_, kind)| *kind == EdgeKind::ConditionalFalse));
+    assert!(can_reach(skip_cfg, branch_work, after_skip));
+
+    let nested_cfg = cfg_for(&cfgs, "NestedConditional");
+    let nested_work = block_with_stmt(nested_cfg, &source, "statement", "NestedWork");
+    let other_work = block_with_stmt(nested_cfg, &source, "statement", "OtherWork");
+    let after_nested = block_with_stmt(nested_cfg, &source, "statement", "AfterNested");
+    assert!(can_reach(nested_cfg, nested_work, after_nested));
+    assert!(can_reach(nested_cfg, other_work, after_nested));
+    assert!(!can_reach(nested_cfg, nested_work, other_work));
+    assert!(!can_reach(nested_cfg, other_work, nested_work));
+
+    let init_cfg = cfg_for(&cfgs, "ConditionalStatements.<initialization>");
+    let init_first = block_with_stmt(init_cfg, &source, "statement", "InitFirst");
+    let init_second = block_with_stmt(init_cfg, &source, "statement", "InitSecond");
+    let init_after = block_with_stmt(init_cfg, &source, "statement", "InitAfter");
+    assert!(can_reach(init_cfg, init_first, init_after));
+    assert!(can_reach(init_cfg, init_second, init_after));
+    assert!(!can_reach(init_cfg, init_first, init_second));
+    assert!(!can_reach(init_cfg, init_second, init_first));
+}
+
+#[test]
+fn preprocessor_statement_blocks_preserve_loop_controls_and_finally_labels() {
+    let source = br#"
+unit ConditionalTransfers;
+interface
+implementation
+
+procedure ConditionalLoopControls;
+begin
+  while LoopCondition do
+  begin
+    {$IFDEF FIRST}
+    Continue;
+    {$ELSE}
+    Break;
+    {$ENDIF}
+  end;
+  AfterLoop;
+end;
+
+procedure ConditionalGotoFinally;
+label Done;
+begin
+  try
+    {$IFDEF FIRST}
+    goto Done;
+    {$ELSE}
+    Work;
+    {$ENDIF}
+  finally
+    Cleanup;
+  end;
+Done:
+  Target;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+
+    let loop_cfg = cfg_for(&cfgs, "ConditionalLoopControls");
+    let condition = block_with_stmt(loop_cfg, &source, "while", "while LoopCondition");
+    let after_loop = successors(loop_cfg, condition)
+        .into_iter()
+        .find_map(|(target, kind)| (kind == EdgeKind::LoopExit).then_some(target))
+        .expect("loop condition must have an exit target");
+    let continue_stmt = block_with_stmt(loop_cfg, &source, "statement", "Continue");
+    let break_stmt = block_with_stmt(loop_cfg, &source, "statement", "Break");
+    assert_eq!(
+        successors(loop_cfg, continue_stmt),
+        vec![(condition, EdgeKind::Normal)]
+    );
+    assert_eq!(
+        successors(loop_cfg, break_stmt),
+        vec![(after_loop, EdgeKind::Normal)]
+    );
+
+    let goto_cfg = cfg_for(&cfgs, "ConditionalGotoFinally");
+    let goto = block_with_stmt(goto_cfg, &source, "goto", "goto Done");
+    let label = block_with_stmt(goto_cfg, &source, "label", "Done:");
+    let cleanup_blocks = blocks_with_stmt(goto_cfg, &source, "statement", "Cleanup");
+    let cleanup = cleanup_blocks
+        .iter()
+        .copied()
+        .find(|cleanup| successors(goto_cfg, goto).contains(&(*cleanup, EdgeKind::FinallyEntry)))
+        .expect("conditional goto must enter finally before leaving its scope");
+    assert!(successors(goto_cfg, cleanup).contains(&(label, EdgeKind::FinallyExit)));
+}
+
+#[test]
 fn foreach_has_a_back_edge_exit_and_nested_loop_controls() {
     let source = br#"
 unit ForEachFlow;

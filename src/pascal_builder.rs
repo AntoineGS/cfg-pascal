@@ -500,6 +500,36 @@ fn handle_case(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow
     }
 }
 
+/// Handle a `with` statement.
+fn handle_with(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) -> Flow {
+    let context_block = prepare_statement_block(ctx, current);
+    if let Some(entity) = field_children(node, "entity").last() {
+        add_stmt_ref_span(
+            ctx,
+            context_block,
+            node.kind(),
+            node.start_byte()..entity.end_byte(),
+        );
+    }
+    let mut transfers = implicit_exception_transfers(ctx, context_block);
+
+    let body_block = new_block(ctx, BasicBlockKind::Normal);
+    ctx.builder
+        .add_edge(context_block, body_block, EdgeKind::Normal);
+    let body_flow = walk_field_children(ctx, node, "body", body_block, false);
+    let after_block = new_block(ctx, BasicBlockKind::Normal);
+    if let Some(body_end) = body_flow.normal {
+        ctx.builder
+            .add_edge(body_end, after_block, EdgeKind::Normal);
+    }
+    transfers.extend(body_flow.transfers);
+
+    Flow {
+        normal: Some(after_block),
+        transfers,
+    }
+}
+
 fn case_selector<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     let selector = node.named_children(&mut cursor).find(|child| {
@@ -564,6 +594,7 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
         "case" => handle_case(ctx, child, current),
         "repeat" => handle_repeat(ctx, child, current),
         "try" => handle_try(ctx, child, current),
+        "with" => handle_with(ctx, child, current),
         "raise" => {
             let statement_block = prepare_statement_block(ctx, current);
             add_stmt_ref(ctx, statement_block, child);

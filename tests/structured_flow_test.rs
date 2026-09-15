@@ -289,3 +289,92 @@ end.
     let header_text = std::str::from_utf8(&source[header_ref.byte_range.clone()]).unwrap();
     assert!(!header_text.contains("BodyCall"));
 }
+
+#[test]
+fn with_evaluates_context_once_and_walks_a_nested_body() {
+    let source = br#"
+unit WithFlow;
+interface
+implementation
+
+procedure NestedWith;
+begin
+  with ContextRecord(), OtherContext() do
+  begin
+    if Ready then
+      NestedBody
+    else
+      AlternateBody;
+  end;
+  AfterWith;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "NestedWith");
+
+    let context = block_with_stmt(cfg, &source, "with", "with ContextRecord(), OtherContext()");
+    let nested_body = block_with_stmt(cfg, &source, "statement", "NestedBody");
+    let alternate_body = block_with_stmt(cfg, &source, "statement", "AlternateBody");
+    let after_with = block_with_stmt(cfg, &source, "statement", "AfterWith");
+
+    let body_entry = successors(cfg, context)
+        .into_iter()
+        .find_map(|(target, kind)| (kind == EdgeKind::Normal).then_some(target))
+        .expect("with context evaluation must enter its body");
+    assert!(can_reach(cfg, body_entry, nested_body));
+    assert!(can_reach(cfg, body_entry, alternate_body));
+    assert!(can_reach(cfg, nested_body, after_with));
+    assert!(can_reach(cfg, alternate_body, after_with));
+
+    let context_ref = cfg.graph[context.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "with")
+        .expect("with context reference");
+    let context_text = std::str::from_utf8(&source[context_ref.byte_range.clone()]).unwrap();
+    assert!(!context_text.contains("NestedBody"));
+    assert!(!context_text.contains("AlternateBody"));
+}
+
+#[test]
+fn with_context_and_body_exceptions_reach_an_enclosing_handler() {
+    let source = br#"
+unit ProtectedWith;
+interface
+implementation
+
+procedure ProtectedWith;
+begin
+  try
+    with ContextCall() do
+      BodyCall;
+  except
+    HandleWith;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ProtectedWith");
+
+    let context = block_with_stmt(cfg, &source, "with", "with ContextCall()");
+    let body = block_with_stmt(cfg, &source, "statement", "BodyCall");
+    let handler = block_with_stmt(cfg, &source, "statement", "HandleWith");
+    assert!(successors(cfg, context).contains(&(handler, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, body).contains(&(handler, EdgeKind::ExceptionThrow)));
+
+    let context_ref = cfg.graph[context.index()]
+        .stmts
+        .iter()
+        .find(|stmt| stmt.node_kind == "with")
+        .expect("with context reference");
+    let context_text = std::str::from_utf8(&source[context_ref.byte_range.clone()]).unwrap();
+    assert!(!context_text.contains("BodyCall"));
+}

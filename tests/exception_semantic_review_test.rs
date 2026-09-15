@@ -115,8 +115,7 @@ end.
 
 #[test]
 fn a_value_shadowing_the_module_qualifier_blocks_module_fallback() {
-    assert_successful_raise_reaches(
-        r#"
+    let source = r#"
 unit U;
 interface
 implementation
@@ -133,11 +132,19 @@ begin
   end;
 end;
 end.
-"#,
-        "P",
-        "raise U.E.Create",
-        "First",
-    );
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise U.E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let first = block_with_stmt(cfg, source, "statement", "First");
+    let second = block_with_stmt(cfg, source, "statement", "Second");
+
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(successful_successors.contains(&(first, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(second, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
 }
 
 #[test]
@@ -238,6 +245,97 @@ end.
 }
 
 #[test]
+fn with_dotted_heads_do_not_treat_members_as_module_qualifiers() {
+    let source = r#"
+unit U;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  B = class(E) constructor Create; end;
+  Meta = class of E;
+  Fields = class
+    E: Meta;
+  end;
+  Holder = class
+    U: Fields;
+  end;
+procedure P(H: Holder);
+begin
+  H.U.E := B;
+  try
+    with H do
+      raise U.E.Create;
+  except
+    on B do First;
+    on E do Second;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise U.E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let first = block_with_stmt(cfg, source, "statement", "First");
+    let second = block_with_stmt(cfg, source, "statement", "Second");
+
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(
+        successful_successors.contains(&(first, EdgeKind::ExceptionThrow)),
+        "a with-provided dotted head must not lose the subclass handler"
+    );
+    assert!(successful_successors.contains(&(second, EdgeKind::ExceptionThrow)));
+    assert!(
+        successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)),
+        "an implicit with member must keep the unmatched outward path"
+    );
+}
+
+#[test]
+fn with_nested_dotted_heads_do_not_fall_back_to_global_types() {
+    let source = r#"
+unit U;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  B = class(E) constructor Create; end;
+  Types = class
+    type
+      ErrorType = E;
+  end;
+  Holder = class
+    Types: Types;
+  end;
+procedure P(H: Holder);
+begin
+  try
+    with H do
+      raise Types.ErrorType.Create;
+  except
+    on B do First;
+    on E do Second;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise Types.ErrorType.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let first = block_with_stmt(cfg, source, "statement", "First");
+    let second = block_with_stmt(cfg, source, "statement", "Second");
+
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(successful_successors.contains(&(first, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(second, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
 fn preprocessor_directives_make_conditional_aliases_conservative() {
     assert_successful_raise_reaches(
         r#"
@@ -327,6 +425,48 @@ end.
         "raise E.Create",
         "First",
     );
+}
+
+#[test]
+fn unresolved_generic_owner_does_not_assume_a_module_qualified_head() {
+    let source = r#"
+unit U;
+interface
+implementation
+type
+  E = class constructor Create; end;
+  L = class(E) constructor Create; end;
+  Meta = class of E;
+  Fields = class
+    E: Meta;
+  end;
+  Holder<T> = class
+    U: Fields;
+  end;
+procedure Holder<T>.P;
+begin
+  U.E := L;
+  try
+    raise U.E.Create;
+  except
+    on U.L do First;
+    on U.E do Second;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let cfgs = build_file_cfgs(&tree, source.as_bytes());
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, source, "raise", "raise U.E.Create");
+    let successful_raise = successful_raise_block(cfg, raise);
+    let first = block_with_stmt(cfg, source, "statement", "First");
+    let second = block_with_stmt(cfg, source, "statement", "Second");
+
+    let successful_successors = successors(cfg, successful_raise);
+    assert!(successful_successors.contains(&(first, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(second, EdgeKind::ExceptionThrow)));
+    assert!(successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
 }
 
 #[test]

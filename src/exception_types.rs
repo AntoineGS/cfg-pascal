@@ -72,6 +72,9 @@ struct LexicalScope {
     start: usize,
     end: usize,
     bindings: Vec<Binding>,
+    /// The scope belongs to a method whose syntactic owner could not be
+    /// resolved. Its missing parent must not be mistaken for the file root.
+    unresolved_owner: bool,
 }
 
 #[derive(Debug)]
@@ -176,7 +179,7 @@ impl ExceptionTypeIndex {
         if self.has_preprocessor_barrier || self.is_unsupported_at(raise.start_byte()) {
             return ExceptionTypeFact::Unknown;
         }
-        if self.is_unqualified_with_reference(&parts, raise.start_byte()) {
+        if self.is_with_implicit_reference(&parts, raise.start_byte()) {
             return ExceptionTypeFact::Unknown;
         }
 
@@ -202,7 +205,7 @@ impl ExceptionTypeIndex {
         let Some(parts) = type_reference_parts(exception, source) else {
             return ExceptionTypeFact::Unknown;
         };
-        if self.is_unqualified_with_reference(&parts, handler.start_byte()) {
+        if self.is_with_implicit_reference(&parts, handler.start_byte()) {
             return ExceptionTypeFact::Unknown;
         }
         let scope = self.scope_at(handler.start_byte());
@@ -621,21 +624,27 @@ impl ExceptionTypeIndex {
         let pending = std::mem::take(&mut self.pending_method_owners);
         for owner in pending {
             let Some(owner_parts) = owner.owner_parts else {
-                self.scopes[owner.routine_scope.0].parent = None;
+                self.mark_unresolved_owner(owner.routine_scope);
                 continue;
             };
             let Some(type_id) =
                 self.resolve_parts(&owner_parts, owner.enclosing_scope, owner.offset)
             else {
-                self.scopes[owner.routine_scope.0].parent = None;
+                self.mark_unresolved_owner(owner.routine_scope);
                 continue;
             };
             let Some(class_scope) = self.class_scope(type_id) else {
-                self.scopes[owner.routine_scope.0].parent = None;
+                self.mark_unresolved_owner(owner.routine_scope);
                 continue;
             };
             self.scopes[owner.routine_scope.0].parent = Some(class_scope);
         }
+    }
+
+    fn mark_unresolved_owner(&mut self, routine_scope: LexicalScopeId) {
+        let scope = &mut self.scopes[routine_scope.0];
+        scope.parent = None;
+        scope.unresolved_owner = true;
     }
 
     fn new_scope(
@@ -650,6 +659,7 @@ impl ExceptionTypeIndex {
             start,
             end,
             bindings: Vec::new(),
+            unresolved_owner: false,
         });
         id
     }
@@ -705,7 +715,7 @@ impl ExceptionTypeIndex {
         if parts.is_empty() {
             return None;
         }
-        let (scope, parts) = self.module_qualified_scope(parts, scope, offset);
+        let (scope, parts) = self.module_qualified_scope(parts, scope, offset)?;
         let first = match self.lookup(scope, &parts[0], offset) {
             Lookup::Type(type_id) => self.resolve_type_id(type_id, seen)?,
             Lookup::Value | Lookup::Unknown => return None,
@@ -723,12 +733,16 @@ impl ExceptionTypeIndex {
         Some(resolved)
     }
 
+    /// Select the lookup scope for a possibly module-qualified name.
+    ///
+    /// An unresolved method owner leaves implicit members unmodeled, so a
+    /// module-looking first component is ambiguous in that scope.
     fn module_qualified_scope<'a>(
         &self,
         parts: &'a [String],
         scope: LexicalScopeId,
         offset: usize,
-    ) -> (LexicalScopeId, &'a [String]) {
+    ) -> Option<(LexicalScopeId, &'a [String])> {
         let is_module_qualified = parts.len() > 1
             && self
                 .module_name
@@ -736,10 +750,24 @@ impl ExceptionTypeIndex {
                 .is_some_and(|module| module == parts[0])
             && !self.qualifier_is_shadowed(scope, &parts[0], offset);
         if is_module_qualified {
-            (self.root_scope, &parts[1..])
+            if self.has_unresolved_owner(scope) {
+                return None;
+            }
+            Some((self.root_scope, &parts[1..]))
         } else {
-            (scope, parts)
+            Some((scope, parts))
         }
+    }
+
+    fn has_unresolved_owner(&self, scope: LexicalScopeId) -> bool {
+        let mut current = Some(scope);
+        while let Some(scope) = current {
+            if self.scopes[scope.0].unresolved_owner {
+                return true;
+            }
+            current = self.scopes[scope.0].parent;
+        }
+        false
     }
 
     fn qualifier_is_shadowed(&self, scope: LexicalScopeId, name: &str, offset: usize) -> bool {
@@ -986,8 +1014,10 @@ impl ExceptionTypeIndex {
             .any(|range| range.start <= offset && offset < range.end)
     }
 
-    fn is_unqualified_with_reference(&self, parts: &[String], offset: usize) -> bool {
-        parts.len() == 1
+    /// Dotted names can still begin with an implicit member of a `with`
+    /// receiver, so their length does not establish explicit qualification.
+    fn is_with_implicit_reference(&self, parts: &[String], offset: usize) -> bool {
+        !parts.is_empty()
             && self
                 .with_ranges
                 .iter()

@@ -257,14 +257,21 @@ end.
         let raise_stmt = block_with_stmt(cfg, &source, "raise", raise_text);
         let first = block_with_stmt(cfg, &source, "statement", first_handler);
         let second = block_with_stmt(cfg, &source, "statement", second_handler);
-        let raise_successors = successors(cfg, raise_stmt);
+        let dispatch_block = successors(cfg, raise_stmt)
+            .into_iter()
+            .find_map(|(target, kind)| {
+                (kind == EdgeKind::Normal && cfg.graph[target.index()].stmts.is_empty())
+                    .then_some(target)
+            })
+            .unwrap_or(raise_stmt);
+        let raise_successors = successors(cfg, dispatch_block);
         assert!(
             raise_successors.contains(&(first, EdgeKind::ExceptionThrow)),
-            "{procedure} must conservatively retain its first typed handler"
+            "{procedure} must conservatively retain its first typed handler on every path"
         );
         assert!(
             raise_successors.contains(&(second, EdgeKind::ExceptionThrow)),
-            "{procedure} must conservatively retain later typed handlers"
+            "{procedure} must conservatively retain later typed handlers on every path"
         );
         assert!(
             raise_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)),

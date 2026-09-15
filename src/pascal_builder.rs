@@ -226,6 +226,7 @@ fn build_scope_cfg(
         next_label_binding,
         ..
     } = label_prepass;
+    let preprocessor_label_bindings = preprocessor_branch_bindings.values().copied().collect();
 
     let mut ctx = BuildContext {
         builder: &mut builder,
@@ -250,6 +251,7 @@ fn build_scope_cfg(
         block_has_executable_stmt: HashSet::new(),
         label_scopes,
         preprocessor_branch_bindings,
+        preprocessor_label_bindings,
         label_targets: HashMap::new(),
     };
 
@@ -504,6 +506,9 @@ struct BuildContext<'a> {
     /// Stable label namespaces assigned to preprocessor branches during the
     /// prepass. Runtime walks use the same IDs when routing branch-local gotos.
     preprocessor_branch_bindings: HashMap<PreprocessorBranchKey, LabelBindingId>,
+    /// Runtime branch namespaces, including fresh copies created while walking
+    /// a cloned finalizer whose lexical parent differs from the prepass.
+    preprocessor_label_bindings: HashSet<LabelBindingId>,
     /// Label targets discovered while walking the procedure body.
     label_targets: HashMap<(LabelBindingId, String), BlockId>,
 }
@@ -642,9 +647,7 @@ fn parent_label_binding(ctx: &BuildContext<'_>, binding: LabelBindingId) -> Opti
 }
 
 fn is_preprocessor_binding(ctx: &BuildContext<'_>, binding: LabelBindingId) -> bool {
-    ctx.preprocessor_branch_bindings
-        .values()
-        .any(|candidate| *candidate == binding)
+    ctx.preprocessor_label_bindings.contains(&binding)
 }
 
 fn is_descendant_label_binding(
@@ -660,6 +663,60 @@ fn is_descendant_label_binding(
         current = parent;
     }
     binding != ancestor
+}
+
+fn runtime_preprocessor_binding(
+    ctx: &mut BuildContext<'_>,
+    prepass_binding: LabelBindingId,
+    parent_binding: LabelBindingId,
+) -> LabelBindingId {
+    if parent_label_binding(ctx, prepass_binding) == Some(parent_binding) {
+        return prepass_binding;
+    }
+
+    let runtime_binding = ctx.next_label_binding;
+    ctx.next_label_binding += 1;
+    ctx.label_binding_parents.push(Some(parent_binding));
+    ctx.preprocessor_label_bindings.insert(runtime_binding);
+
+    let branch_scopes: Vec<_> = ctx
+        .label_scopes
+        .iter()
+        .filter_map(|((binding, label), scopes)| {
+            (*binding == prepass_binding).then_some((label.clone(), scopes.clone()))
+        })
+        .collect();
+    for (label, scopes) in branch_scopes {
+        ctx.label_scopes.insert((runtime_binding, label), scopes);
+    }
+
+    runtime_binding
+}
+
+fn copy_visible_label_scopes(
+    ctx: &mut BuildContext<'_>,
+    start: LabelBindingId,
+    target: LabelBindingId,
+) {
+    let mut visible = HashMap::new();
+    let mut binding = Some(start);
+    while let Some(candidate) = binding {
+        let scopes: Vec<_> = ctx
+            .label_scopes
+            .iter()
+            .filter_map(|((scope_binding, label), scopes)| {
+                (*scope_binding == candidate).then_some((label.clone(), scopes.clone()))
+            })
+            .collect();
+        for (label, scopes) in scopes {
+            visible.entry(label).or_insert(scopes);
+        }
+        binding = parent_label_binding(ctx, candidate);
+    }
+
+    for (label, scopes) in visible {
+        ctx.label_scopes.insert((target, label), scopes);
+    }
 }
 
 fn transfer_completion_edge(transfer: &PendingTransfer) -> EdgeKind {
@@ -1297,11 +1354,12 @@ fn handle_preprocessor_block(ctx: &mut BuildContext<'_>, node: Node, current: Bl
         };
         ctx.builder.add_edge(current, branch_entry, edge_kind);
 
-        let branch_binding = ctx
+        let prepass_binding = ctx
             .preprocessor_branch_bindings
             .get(&(node.start_byte(), node.end_byte(), index))
             .copied()
             .expect("preprocessor branch label namespace missing from prepass");
+        let branch_binding = runtime_preprocessor_binding(ctx, prepass_binding, parent_binding);
         ctx.current_label_binding = branch_binding;
         let branch_flow = walk_node_children(ctx, branch, branch_entry);
         ctx.current_label_binding = parent_binding;
@@ -1731,6 +1789,7 @@ fn walk_or_reuse_finally_body(
     let label_binding = ctx.next_label_binding;
     ctx.next_label_binding += 1;
     ctx.label_binding_parents.push(Some(previous_label_binding));
+    copy_visible_label_scopes(ctx, previous_label_binding, label_binding);
     ctx.current_label_binding = label_binding;
     let previous_finalizer_continuation = ctx.active_finalizer_continuation;
     let previous_suspended_transfer = ctx.active_finalizer_suspended_transfer.clone();

@@ -570,6 +570,55 @@ end.
 }
 
 #[test]
+fn preprocessor_labels_inside_cloned_finalizers_keep_their_local_binding() {
+    let source = br#"
+unit ConditionalFinalizerLabels;
+interface
+implementation
+
+procedure ConditionalFinalizerLabels;
+label Done;
+begin
+  try
+    Work;
+  finally
+    {$IFDEF FIRST}
+    goto Done;
+    {$ELSEIF SECOND}
+    goto Done;
+    {$ENDIF}
+  Done:
+    CleanupDone;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ConditionalFinalizerLabels");
+    let gotos = blocks_with_stmt(cfg, &source, "goto", "goto Done");
+
+    assert!(gotos.len() >= 2);
+    for goto in gotos {
+        let edges = successors(cfg, goto);
+        let [(target, kind)] = edges.as_slice() else {
+            panic!("finalizer goto must have one resolved target edge");
+        };
+        assert_eq!(*kind, EdgeKind::FinallyExit);
+        assert!(
+            cfg.graph[target.index()].stmts.iter().any(|stmt| {
+                stmt.node_kind == "label"
+                    && std::str::from_utf8(&source[stmt.byte_range.clone()])
+                        .is_ok_and(|text| text.contains("Done:"))
+            }),
+            "a preprocessor-branch goto inside a finalizer must resolve a finalizer-local label"
+        );
+    }
+}
+
+#[test]
 fn preprocessor_statement_blocks_preserve_loop_controls_and_finally_labels() {
     let source = br#"
 unit ConditionalTransfers;

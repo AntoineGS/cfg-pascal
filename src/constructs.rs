@@ -149,7 +149,7 @@ pub(crate) enum TransferKind {
 
 /// A pending control transfer whose edge has not yet been routed through all
 /// enclosing cleanup scopes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PendingTransfer {
     pub source: BlockId,
     pub kind: TransferKind,

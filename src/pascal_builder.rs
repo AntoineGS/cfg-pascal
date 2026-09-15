@@ -1128,7 +1128,7 @@ struct FinalizerCacheKey {
     start_byte: usize,
     end_byte: usize,
     scope_id: ScopeId,
-    continuation: ContinuationKey,
+    continuation: Option<ContinuationKey>,
     cleanup_scopes: Vec<ScopeId>,
     loop_context: Vec<(BlockId, BlockId, Vec<ScopeId>, Vec<ScopeId>)>,
     /// Concrete handler-dispatch instances; depth alone can alias different
@@ -1147,6 +1147,11 @@ struct CachedFinalizerBody {
     flow: Flow,
 }
 
+fn dedup_transfers(transfers: &mut Vec<PendingTransfer>) {
+    let mut seen = HashSet::new();
+    transfers.retain(|transfer| seen.insert(transfer.clone()));
+}
+
 /// Handle a `try..finally` block.
 ///
 /// Incoming continuations share a finalizer body only when their effective
@@ -1163,9 +1168,10 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
 
     ctx.cleanup_scopes.push(scope_id);
     ctx.implicit_exception_depth += 1;
-    let try_flow = walk_try_body(ctx, node, current);
+    let mut try_flow = walk_try_body(ctx, node, current);
     ctx.implicit_exception_depth -= 1;
     ctx.cleanup_scopes.pop();
+    dedup_transfers(&mut try_flow.transfers);
 
     let mut inputs = Vec::new();
     if let Some(normal) = try_flow.normal {
@@ -1248,6 +1254,7 @@ fn handle_try_finally(ctx: &mut BuildContext<'_>, node: Node, current: BlockId) 
         );
     }
 
+    dedup_transfers(&mut output.transfers);
     output
 }
 
@@ -1257,11 +1264,11 @@ fn walk_or_reuse_finally_body(
     scope_id: ScopeId,
     continuation: Option<&ContinuationKey>,
 ) -> (BlockId, Flow) {
-    let cache_key = continuation.map(|continuation| FinalizerCacheKey {
+    let cache_key = FinalizerCacheKey {
         start_byte: node.start_byte(),
         end_byte: node.end_byte(),
         scope_id,
-        continuation: continuation.clone(),
+        continuation: continuation.cloned(),
         cleanup_scopes: ctx.cleanup_scopes.clone(),
         loop_context: ctx
             .loop_stack
@@ -1278,12 +1285,10 @@ fn walk_or_reuse_finally_body(
         exception_dispatch_context: ctx.exception_dispatch_stack.clone(),
         implicit_exception_depth: ctx.implicit_exception_depth,
         label_binding: finally_body_contains_goto(node).then_some(ctx.current_label_binding),
-    });
+    };
 
-    if let Some(cache_key) = &cache_key {
-        if let Some(cached) = ctx.finalizer_cache.get(cache_key).cloned() {
-            return (cached.entry, cached.flow);
-        }
+    if let Some(cached) = ctx.finalizer_cache.get(&cache_key).cloned() {
+        return (cached.entry, cached.flow);
     }
 
     let finally_block = new_block(ctx, BasicBlockKind::FinallyHandler);
@@ -1297,15 +1302,13 @@ fn walk_or_reuse_finally_body(
     ctx.current_label_binding = previous_label_binding;
     ctx.implicit_exception_depth -= 1;
 
-    if let Some(cache_key) = cache_key {
-        ctx.finalizer_cache.insert(
-            cache_key,
-            CachedFinalizerBody {
-                entry: finally_block,
-                flow: finally_flow.clone(),
-            },
-        );
-    }
+    ctx.finalizer_cache.insert(
+        cache_key,
+        CachedFinalizerBody {
+            entry: finally_block,
+            flow: finally_flow.clone(),
+        },
+    );
 
     (finally_block, finally_flow)
 }

@@ -561,11 +561,16 @@ fn deeply_nested_finalizers_have_bounded_cfg_size() {
         "nested finalizers should share equivalent cleanup paths, got {} blocks",
         cfg.graph.node_count()
     );
+    assert!(
+        cfg.graph.edge_count() < 10_000,
+        "nested finalizers should keep edge growth bounded, got {} edges",
+        cfg.graph.edge_count()
+    );
 }
 
 #[test]
 fn nested_try_bodies_inside_finalizers_have_bounded_cfg_size() {
-    const DEPTH: usize = 12;
+    const DEPTH: usize = 16;
     let mut body = String::from("Cleanup;");
     for _ in 0..DEPTH {
         body = format!("try Work; finally {body} end;");
@@ -587,6 +592,11 @@ end.\n"
         cfg.graph.node_count() < 1_000,
         "nested try bodies in finalizers should share cleanup subgraphs, got {} blocks",
         cfg.graph.node_count()
+    );
+    assert!(
+        cfg.graph.edge_count() < 10_000,
+        "nested try bodies in finalizers should keep edge growth bounded, got {} edges",
+        cfg.graph.edge_count()
     );
 }
 

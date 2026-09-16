@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{fmt::Write as _, ops::Range};
 
 use cfg_core::{BasicBlockKind, BlockId, Cfg, EdgeKind};
 use cfg_pascal::{
@@ -267,6 +267,67 @@ fn project_snapshot_rejects_non_uses_and_out_of_bounds_binding_sites() {
         ProjectSnapshot::new(vec![consumer], vec![out_of_bounds]),
         Err(ProjectSnapshotError::InvalidImportSite { .. })
     ));
+}
+
+#[test]
+fn project_snapshot_validates_many_sites_in_a_large_unit_without_dropping_any_binding() {
+    const IMPORT_COUNT: usize = 400;
+    const STATEMENT_COUNT: usize = 20_000;
+
+    let mut consumer_source = String::with_capacity(160 * 1024);
+    consumer_source.push_str("unit Consumer; interface uses ");
+    for index in 0..IMPORT_COUNT {
+        if index > 0 {
+            consumer_source.push_str(", ");
+        }
+        write!(consumer_source, "External{index}").expect("write import name");
+    }
+    consumer_source.push_str("; implementation procedure P; begin\n");
+    for index in 0..STATEMENT_COUNT {
+        writeln!(consumer_source, "  Statement{index};").expect("write statement");
+    }
+    consumer_source.push_str("end; end.");
+    let consumer_source = consumer_source.into_bytes();
+    let consumer_tree = parse_clean(&consumer_source);
+    let use_sites = uses_spans(&consumer_tree);
+    assert_eq!(use_sites.len(), IMPORT_COUNT);
+
+    let mut units = Vec::with_capacity(IMPORT_COUNT + 1);
+    for index in 0..IMPORT_COUNT {
+        let target_id = format!("target-{index}");
+        let target_source = format!("unit External{index}; interface implementation end.");
+        units.push(unit(&target_id, &target_source).0);
+    }
+    units.push(ProjectUnitInput::new(
+        ProjectUnitId::new("consumer"),
+        ProjectSourceId::new("consumer.pas"),
+        consumer_tree,
+        consumer_source,
+    ));
+
+    let imports = use_sites
+        .into_iter()
+        .enumerate()
+        .map(|(index, byte_range)| {
+            ImportBinding::new(
+                UsesSite::new(ProjectUnitId::new("consumer"), byte_range),
+                ImportTarget::Loaded(ProjectUnitId::new(format!("target-{index}"))),
+                [format!("External{index}")],
+            )
+        })
+        .collect();
+
+    let snapshot = ProjectSnapshot::new(units, imports).expect("large project snapshot");
+    assert_eq!(snapshot.units().len(), IMPORT_COUNT + 1);
+    assert_eq!(snapshot.imports().len(), IMPORT_COUNT);
+    assert_eq!(
+        snapshot
+            .unit(&ProjectUnitId::new("consumer"))
+            .unwrap()
+            .id()
+            .as_str(),
+        "consumer"
+    );
 }
 
 #[test]

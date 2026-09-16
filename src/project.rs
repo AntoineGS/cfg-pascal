@@ -430,19 +430,20 @@ impl ProjectSnapshot {
         units: Vec<ProjectUnitInput>,
         imports: Vec<ImportBinding>,
     ) -> Result<Self, ProjectSnapshotError> {
-        let mut unit_ids = HashSet::new();
+        let mut unit_indices = HashMap::with_capacity(units.len());
         let mut source_ids = HashSet::new();
         let mut original_bytes: HashMap<ProjectSourceId, Arc<[u8]>> = HashMap::new();
         let mut configuration_id: Option<String> = None;
+        let mut import_site_spans_by_unit = Vec::with_capacity(units.len());
 
-        for unit in &units {
+        for (unit_index, unit) in units.iter().enumerate() {
             if unit.id.as_str().is_empty() {
                 return Err(ProjectSnapshotError::EmptyUnitId);
             }
             if unit.source_id.as_str().is_empty() {
                 return Err(ProjectSnapshotError::EmptySourceId);
             }
-            if !unit_ids.insert(unit.id.clone()) {
+            if unit_indices.insert(unit.id.clone(), unit_index).is_some() {
                 return Err(ProjectSnapshotError::DuplicateUnitId(unit.id.clone()));
             }
             if !source_ids.insert(unit.source_id.clone()) {
@@ -495,20 +496,21 @@ impl ProjectSnapshot {
                         .insert(original.source_id().clone(), Arc::from(original.bytes()));
                 }
             }
+
+            import_site_spans_by_unit.push(import_site_spans(unit.tree.root_node()));
         }
 
         let mut import_sites = HashSet::new();
         for import in &imports {
             let unit_id = import.site.unit_id();
-            let Some(unit) = units.iter().find(|unit| unit.id == *unit_id) else {
+            let Some(&unit_index) = unit_indices.get(unit_id) else {
                 return Err(ProjectSnapshotError::InvalidImportSite {
                     unit_id: unit_id.clone(),
                     byte_range: import.site.byte_range(),
                 });
             };
             let byte_range = import.site.byte_range();
-            if !import_site_spans(unit.tree.root_node())
-                .contains(&(byte_range.start, byte_range.end))
+            if !import_site_spans_by_unit[unit_index].contains(&(byte_range.start, byte_range.end))
             {
                 return Err(ProjectSnapshotError::InvalidImportSite {
                     unit_id: unit_id.clone(),
@@ -523,7 +525,7 @@ impl ProjectSnapshot {
             }
 
             if let ImportTarget::Loaded(target) = import.target() {
-                if !unit_ids.contains(target) {
+                if !unit_indices.contains_key(target) {
                     return Err(ProjectSnapshotError::DanglingLoadedTarget {
                         importer: unit_id.clone(),
                         target: target.clone(),

@@ -121,6 +121,9 @@ impl SourceSpan {
 /// Repeated inclusion of the same source must use a different ID for each
 /// occurrence.  Nested occurrences can use a caller-defined hierarchy such
 /// as `include-1` and `include-1/nested`; the map treats IDs as opaque.
+/// Origin-bearing segments for one occurrence must refer to one source file;
+/// discontiguous ranges within that source are allowed around nested
+/// occurrences.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExpansionId(String);
 
@@ -326,6 +329,20 @@ pub enum SourceMapError {
         previous: Range<usize>,
         next: Range<usize>,
     },
+    /// Two origin-bearing segments reused an original range within one
+    /// source/expansion occurrence.
+    OverlappingOriginalRanges {
+        source_id: ProjectSourceId,
+        expansion_id: ExpansionId,
+        previous: Range<usize>,
+        next: Range<usize>,
+    },
+    /// One expansion occurrence claimed origins in more than one source.
+    ExpansionSourceMismatch {
+        expansion_id: ExpansionId,
+        expected: ProjectSourceId,
+        found: ProjectSourceId,
+    },
     /// A copied or masked segment did not carry an original span.
     MissingOrigin {
         prepared_range: Range<usize>,
@@ -421,6 +438,25 @@ impl fmt::Display for SourceMapError {
                 "source map ranges {:?} and {:?} overlap",
                 previous, next
             ),
+            Self::OverlappingOriginalRanges {
+                source_id,
+                expansion_id,
+                previous,
+                next,
+            } => write!(
+                formatter,
+                "source {:?} ranges {:?} and {:?} overlap within expansion {:?}",
+                source_id, previous, next, expansion_id
+            ),
+            Self::ExpansionSourceMismatch {
+                expansion_id,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "expansion {:?} maps to source {:?} and source {:?}",
+                expansion_id, expected, found
+            ),
             Self::MissingOrigin {
                 prepared_range,
                 kind,
@@ -495,8 +531,10 @@ impl SourceMap {
     /// Validation checks that segments form ordered full coverage, all source
     /// identities are unique and present, copied/masked ranges have equal
     /// lengths, copied bytes match exactly, and masked bytes contain only
-    /// whitespace while preserving line breaks.  Synthetic bytes are valid
-    /// only when their lack of origin is explicit in the segment.
+    /// whitespace while preserving line breaks.  Origin ranges are non-
+    /// overlapping within each source/expansion pair, and one expansion
+    /// occurrence cannot claim more than one source.  Synthetic bytes are
+    /// valid only when their lack of origin is explicit in the segment.
     pub fn new(
         prepared_bytes: impl AsRef<[u8]>,
         original_sources: Vec<SourceSnapshot>,
@@ -523,6 +561,9 @@ impl SourceMap {
 
         let mut expected_start = 0;
         let mut previous_range = None;
+        let mut expansion_sources: HashMap<ExpansionId, ProjectSourceId> = HashMap::new();
+        let mut original_ranges: HashMap<(ProjectSourceId, ExpansionId), Vec<Range<usize>>> =
+            HashMap::new();
         for segment in &segments {
             if segment.expansion_id.as_str().is_empty() {
                 return Err(SourceMapError::EmptyExpansionId);
@@ -578,6 +619,18 @@ impl SourceMap {
                     let Some(&source_index) = sources.get(&original.source_id) else {
                         return Err(SourceMapError::UnknownSourceId(original.source_id.clone()));
                     };
+                    if let Some(expected_source_id) = expansion_sources.get(&segment.expansion_id) {
+                        if expected_source_id != &original.source_id {
+                            return Err(SourceMapError::ExpansionSourceMismatch {
+                                expansion_id: segment.expansion_id.clone(),
+                                expected: expected_source_id.clone(),
+                                found: original.source_id.clone(),
+                            });
+                        }
+                    } else {
+                        expansion_sources
+                            .insert(segment.expansion_id.clone(), original.source_id.clone());
+                    }
                     let source = &original_sources[source_index];
                     let original_range = &original.byte_range;
                     if original_range.start > original_range.end {
@@ -599,6 +652,21 @@ impl SourceMap {
                             original_range: original_range.clone(),
                         });
                     }
+                    let ranges = original_ranges
+                        .entry((original.source_id.clone(), segment.expansion_id.clone()))
+                        .or_default();
+                    if let Some(previous) = ranges
+                        .iter()
+                        .find(|previous| ranges_overlap(previous, original_range))
+                    {
+                        return Err(SourceMapError::OverlappingOriginalRanges {
+                            source_id: original.source_id.clone(),
+                            expansion_id: segment.expansion_id.clone(),
+                            previous: previous.clone(),
+                            next: original_range.clone(),
+                        });
+                    }
+                    ranges.push(original_range.clone());
 
                     match kind {
                         SourceSegmentKind::Copied => {
@@ -784,4 +852,8 @@ fn validate_mask(
         }
     }
     Ok(())
+}
+
+fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
+    left.start < right.end && right.start < left.end
 }

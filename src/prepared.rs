@@ -85,6 +85,16 @@ pub enum PreparedSourceError {
     ParserReturnedNoTree,
     /// The prepared bytes produced a tree containing parser errors.
     ParserErrors { range: Range<usize> },
+    /// The raw identity convenience path found an unresolved preprocessor
+    /// node.  Callers that have resolved the directive must use
+    /// [`PreparedSource::new`]
+    /// with the resulting prepared bytes and source map instead.
+    UnresolvedPreprocessor {
+        /// Byte range of the first preprocessor node.
+        range: Range<usize>,
+        /// Tree-sitter kind of the preprocessor node.
+        node_kind: String,
+    },
 }
 
 impl fmt::Display for PreparedSourceError {
@@ -119,6 +129,10 @@ impl fmt::Display for PreparedSourceError {
                     "prepared Pascal source contains parser errors in {range:?}"
                 )
             }
+            Self::UnresolvedPreprocessor { range, node_kind } => write!(
+                formatter,
+                "raw identity preparation cannot claim completeness for {node_kind:?} in {range:?}"
+            ),
         }
     }
 }
@@ -268,11 +282,22 @@ impl PreparedSource {
     }
 
     /// Construct a complete raw identity projection.
+    ///
+    /// This convenience path is valid only for a parse-clean source without
+    /// any preprocessor nodes.  An unresolved include or conditional directive
+    /// is rejected rather than being silently treated as complete.  Callers
+    /// with a resolved configuration should use [`Self::new`] and provide the
+    /// prepared bytes and source map explicitly.
     pub fn identity(
         source_id: ProjectSourceId,
         bytes: impl AsRef<[u8]>,
         configuration_id: impl Into<String>,
     ) -> Result<Self, PreparedSourceError> {
+        let bytes_ref = bytes.as_ref();
+        let tree = parse_clean(bytes_ref)?;
+        if let Some((range, node_kind)) = first_preprocessor_node(tree.root_node()) {
+            return Err(PreparedSourceError::UnresolvedPreprocessor { range, node_kind });
+        }
         let snapshot = SourceSnapshot::new(source_id.clone(), bytes.as_ref());
         let source_map = SourceMap::identity(snapshot)?;
         Self::new(
@@ -354,4 +379,35 @@ impl PreparedSource {
             self.provenance,
         )
     }
+}
+
+fn parse_clean(bytes: &[u8]) -> Result<Tree, PreparedSourceError> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&crate::LANGUAGE.into())
+        .map_err(|_| PreparedSourceError::ParserReturnedNoTree)?;
+    let tree = parser
+        .parse(bytes, None)
+        .ok_or(PreparedSourceError::ParserReturnedNoTree)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err(PreparedSourceError::ParserErrors {
+            range: root.start_byte()..root.end_byte(),
+        });
+    }
+    Ok(tree)
+}
+
+fn first_preprocessor_node(root: tree_sitter::Node<'_>) -> Option<(Range<usize>, String)> {
+    if root.kind().starts_with("pp") {
+        return Some((root.start_byte()..root.end_byte(), root.kind().to_string()));
+    }
+
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if let Some(found) = first_preprocessor_node(child) {
+            return Some(found);
+        }
+    }
+    None
 }

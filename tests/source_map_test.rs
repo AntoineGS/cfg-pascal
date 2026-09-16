@@ -2,10 +2,10 @@ use std::{ops::Range, sync::Arc};
 
 use cfg_core::{BlockId, Cfg, EdgeKind, StmtRef};
 use cfg_pascal::{
-    build_file_cfgs_in_project, ExpansionId, ImportBinding, ImportTarget, PreparationFidelity,
-    PreparationProvenance, PreparedSource, ProjectSnapshot, ProjectSnapshotError, ProjectSourceId,
-    ProjectUnitId, ProjectUnitInput, SourceMap, SourceMapError, SourceMapSegment,
-    SourceSegmentKind, SourceSnapshot, UsesSite,
+    build_file_cfgs, build_file_cfgs_in_project, ExpansionId, ImportBinding, ImportTarget,
+    PreparationFidelity, PreparationProvenance, PreparedSource, ProjectSnapshot,
+    ProjectSnapshotError, ProjectSourceId, ProjectUnitId, ProjectUnitInput, SourceMap,
+    SourceMapError, SourceMapSegment, SourceSegmentKind, SourceSnapshot, UsesSite,
 };
 use tree_sitter::{Node, Parser, Tree};
 
@@ -164,24 +164,28 @@ fn masked_projection(
 #[test]
 fn source_map_preserves_repeated_nested_include_occurrences_and_cross_file_ranges() {
     let map = SourceMap::new(
-        b"main;one;two;",
-        vec![source("main.pas", b"main;"), source("inc.pas", b"one;two;")],
+        b"main;one;two;tail",
+        vec![
+            source("main.pas", b"main;tail"),
+            source("inc.pas", b"one;two;"),
+        ],
         vec![
             copied(0..5, "main.pas", 0..5, "root"),
             copied(5..9, "inc.pas", 0..4, "include-1"),
             copied(9..13, "inc.pas", 4..8, "include-1/nested"),
+            copied(13..17, "main.pas", 5..9, "root"),
         ],
     )
     .expect("valid repeated include map");
 
     let statement = StmtRef {
-        byte_range: 3..11,
+        byte_range: 3..15,
         node_kind: "statement".into(),
     };
     let mapped = map
         .map_range(statement.byte_range.clone())
         .expect("range should be mappable");
-    assert_eq!(mapped.len(), 3, "cross-file ranges retain every segment");
+    assert_eq!(mapped.len(), 4, "cross-file ranges retain every segment");
     assert_eq!(mapped[0].prepared_range, 3..5);
     assert_eq!(mapped[0].original.as_ref().unwrap().byte_range, 3..5);
     assert_eq!(mapped[0].expansion_id.as_str(), "root");
@@ -191,8 +195,11 @@ fn source_map_preserves_repeated_nested_include_occurrences_and_cross_file_range
     );
     assert_eq!(mapped[1].original.as_ref().unwrap().byte_range, 0..4);
     assert_eq!(mapped[1].expansion_id.as_str(), "include-1");
-    assert_eq!(mapped[2].original.as_ref().unwrap().byte_range, 4..6);
+    assert_eq!(mapped[2].original.as_ref().unwrap().byte_range, 4..8);
     assert_eq!(mapped[2].expansion_id.as_str(), "include-1/nested");
+    assert_eq!(mapped[3].prepared_range, 13..15);
+    assert_eq!(mapped[3].original.as_ref().unwrap().byte_range, 5..7);
+    assert_eq!(mapped[3].expansion_id.as_str(), "root");
 
     let repeated = SourceMap::new(
         b"one;one;",
@@ -213,6 +220,51 @@ fn source_map_preserves_repeated_nested_include_occurrences_and_cross_file_range
         ExpansionId::new("occurrence-2")
     );
     assert_eq!(repeated_spans[0].original, repeated_spans[1].original);
+}
+
+#[test]
+fn source_map_rejects_reused_origin_ranges_and_mixed_expansion_sources() {
+    let same_occurrence = SourceMap::new(
+        b"one;one;",
+        vec![source("inc.pas", b"one;")],
+        vec![
+            copied(0..4, "inc.pas", 0..4, "same-occurrence"),
+            copied(4..8, "inc.pas", 0..4, "same-occurrence"),
+        ],
+    );
+    let error = same_occurrence.expect_err("one occurrence must not reuse an origin range");
+    assert!(matches!(
+        error,
+        SourceMapError::OverlappingOriginalRanges { .. }
+    ));
+
+    let masked_overlap = SourceMap::new(
+        b"  ",
+        vec![source("inc.pas", b"ab")],
+        vec![
+            masked(0..1, "inc.pas", 0..1, "same-occurrence"),
+            masked(1..2, "inc.pas", 0..1, "same-occurrence"),
+        ],
+    );
+    let error = masked_overlap.expect_err("masked origins must not overlap either");
+    assert!(matches!(
+        error,
+        SourceMapError::OverlappingOriginalRanges { .. }
+    ));
+
+    let mixed_sources = SourceMap::new(
+        b"one;two;",
+        vec![source("inc.pas", b"one;"), source("other.pas", b"two;")],
+        vec![
+            copied(0..4, "inc.pas", 0..4, "same-occurrence"),
+            copied(4..8, "other.pas", 0..4, "same-occurrence"),
+        ],
+    );
+    let error = mixed_sources.expect_err("one occurrence must not span source files");
+    assert!(matches!(
+        error,
+        SourceMapError::ExpansionSourceMismatch { .. }
+    ));
 }
 
 #[test]
@@ -446,6 +498,29 @@ fn prepared_source_requires_explicit_complete_clean_input_and_retains_provenance
         ),
         Err(cfg_pascal::PreparedSourceError::ParserErrors { .. })
     ));
+}
+
+#[test]
+fn identity_rejects_unresolved_preprocessor_content_instead_of_claiming_complete() {
+    let source = b"program Demo; begin\n{$I missing.inc}\nend.";
+    let result = PreparedSource::identity(ProjectSourceId::new("demo.pas"), source, "debug");
+    let error = result.expect_err("an unresolved include must not become complete");
+    assert!(matches!(
+        &error,
+        cfg_pascal::PreparedSourceError::UnresolvedPreprocessor { .. }
+    ));
+    assert!(error.to_string().contains("raw identity preparation"));
+
+    let raw_tree = parse_clean(source);
+    assert!(!build_file_cfgs(&raw_tree, source).is_empty());
+
+    let clean_identity = PreparedSource::identity(
+        ProjectSourceId::new("clean.pas"),
+        b"program Clean; begin end.",
+        "debug",
+    )
+    .expect("a parse-clean source without preprocessor nodes is a valid identity");
+    assert_eq!(clean_identity.provenance(), PreparationProvenance::Raw);
 }
 
 #[test]

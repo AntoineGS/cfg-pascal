@@ -69,8 +69,11 @@ prepared buffer.  `Copied` segments must match their original bytes;
 `Masked` segments may contain only whitespace and must preserve line breaks;
 `Synthetic` segments explicitly have no origin.  The `ExpansionId` on each
 segment distinguishes repeated and nested include occurrences, even when they
-reuse the same original range.  `map_range` returns every clipped mapped span,
-so a statement crossing an include boundary is not forced into one file.
+reuse the same original range.  Each origin-bearing expansion is constrained to
+one original source with non-overlapping original ranges, while discontiguous
+root ranges around nested includes remain valid.  `map_range` returns every
+clipped mapped span, so a statement crossing an include boundary is not forced
+into one file.
 
 `PreparedSource::new` is intentionally strict: the caller must mark the
 projection as `PreparationFidelity::Complete`, provide a configuration ID and
@@ -78,7 +81,9 @@ provenance, and the prepared bytes must parse cleanly with this crate's
 `LANGUAGE`.  `Unresolved`, `Lossy`, and `Incomplete` preparation is rejected;
 the raw `build_file_cfgs`/`ProjectUnitInput::new` APIs remain available and
 conservative.  The absence of preprocessor nodes is never treated as proof of
-completeness.
+completeness.  The `PreparedSource::identity` convenience path is narrower: it
+rejects any preprocessor node, including an unresolved include, instead of
+auto-claiming `Complete`; configured projections must use `PreparedSource::new`.
 
 The executable rustdoc example on `PreparedSource::new` shows the full
 construction path:

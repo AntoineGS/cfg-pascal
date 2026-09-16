@@ -59,6 +59,62 @@ let cfgs = build_file_cfgs_in_project(&snapshot, &ProjectUnitId::from("demo")).u
 assert!(cfgs.is_empty());
 ```
 
+## Prepared source and mapping contract
+
+Configured source preparation is a separate caller-owned layer.  The crate
+does not load include files or evaluate compiler configuration.  A preparer
+must provide immutable [`SourceSnapshot`](../src/source_map.rs) values and an
+ordered [`SourceMap`](../src/source_map.rs) whose segments cover the complete
+prepared buffer.  `Copied` segments must match their original bytes;
+`Masked` segments may contain only whitespace and must preserve line breaks;
+`Synthetic` segments explicitly have no origin.  The `ExpansionId` on each
+segment distinguishes repeated and nested include occurrences, even when they
+reuse the same original range.  `map_range` returns every clipped mapped span,
+so a statement crossing an include boundary is not forced into one file.
+
+`PreparedSource::new` is intentionally strict: the caller must mark the
+projection as `PreparationFidelity::Complete`, provide a configuration ID and
+provenance, and the prepared bytes must parse cleanly with this crate's
+`LANGUAGE`.  `Unresolved`, `Lossy`, and `Incomplete` preparation is rejected;
+the raw `build_file_cfgs`/`ProjectUnitInput::new` APIs remain available and
+conservative.  The absence of preprocessor nodes is never treated as proof of
+completeness.
+
+The executable rustdoc example on `PreparedSource::new` shows the full
+construction path:
+
+```rust
+use cfg_pascal::{
+    PreparationFidelity, PreparationProvenance, PreparedSource, ProjectSnapshot,
+    ProjectSourceId, ProjectUnitId, ProjectUnitInput, SourceMap, SourceSnapshot,
+};
+
+let bytes = b"unit Demo; interface implementation end.";
+let map = SourceMap::identity(SourceSnapshot::new(
+    ProjectSourceId::from("demo.pas"),
+    bytes,
+))
+.unwrap();
+let prepared = PreparedSource::new(
+    ProjectSourceId::from("demo.prepared"),
+    bytes,
+    map,
+    "debug",
+    PreparationFidelity::Complete,
+    PreparationProvenance::Configured,
+)
+.unwrap();
+let unit = ProjectUnitInput::from_prepared(ProjectUnitId::from("demo"), prepared);
+let snapshot = ProjectSnapshot::new(vec![unit], Vec::new()).unwrap();
+assert_eq!(snapshot.configuration_id(), Some("debug"));
+```
+
+Prepared units retain their map and original snapshots through
+`ProjectUnitInput::source_map()` and `original_sources()`.  All prepared units
+in a project snapshot must use the same configuration ID.  If several prepared
+units retain an original source with the same source ID, their bytes must be
+identical; otherwise snapshot construction fails rather than mixing revisions.
+
 ## Exception precision boundary
 
 Typed constructor dispatch is precise only for proven non-generic classes and

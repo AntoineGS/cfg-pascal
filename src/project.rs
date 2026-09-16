@@ -6,9 +6,17 @@
 //! from an editor/LSP project model without giving this crate filesystem or
 //! process access.
 
-use std::{collections::HashSet, fmt, ops::Range, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    ops::Range,
+    sync::Arc,
+};
 
 use tree_sitter::{Node, Tree};
+
+use crate::prepared::{PreparationFidelity, PreparationProvenance, PreparedSource};
+use crate::source_map::{SourceMap, SourceSnapshot};
 
 /// Stable caller-assigned identity for one logical parsed Pascal unit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -82,6 +90,10 @@ pub struct ProjectUnitInput {
     source_id: ProjectSourceId,
     tree: Tree,
     source: Arc<[u8]>,
+    source_map: Option<SourceMap>,
+    configuration_id: Option<String>,
+    preparation_fidelity: Option<PreparationFidelity>,
+    preparation_provenance: Option<PreparationProvenance>,
 }
 
 impl ProjectUnitInput {
@@ -97,6 +109,38 @@ impl ProjectUnitInput {
             source_id,
             tree,
             source: Arc::from(source.as_ref()),
+            source_map: None,
+            configuration_id: None,
+            preparation_fidelity: None,
+            preparation_provenance: None,
+        }
+    }
+
+    /// Construct a project unit from a strict prepared source.
+    ///
+    /// The prepared tree and bytes are moved into the unit together with its
+    /// source map, original snapshots, configuration identity, fidelity, and
+    /// provenance.  The unit's source ID is the prepared source ID; original
+    /// source IDs remain available through [`Self::source_map`].
+    pub fn from_prepared(id: ProjectUnitId, prepared: PreparedSource) -> Self {
+        let (
+            source_id,
+            tree,
+            source,
+            source_map,
+            configuration_id,
+            preparation_fidelity,
+            preparation_provenance,
+        ) = prepared.into_parts();
+        Self {
+            id,
+            source_id,
+            tree,
+            source,
+            source_map: Some(source_map),
+            configuration_id: Some(configuration_id),
+            preparation_fidelity: Some(preparation_fidelity),
+            preparation_provenance: Some(preparation_provenance),
         }
     }
 
@@ -118,6 +162,43 @@ impl ProjectUnitInput {
     /// Borrow the immutable source bytes paired with [`Self::tree`].
     pub fn source(&self) -> &[u8] {
         &self.source
+    }
+
+    /// Borrow the prepared-to-original map, when this unit came from a
+    /// [`PreparedSource`].  Raw [`Self::new`] inputs intentionally carry no
+    /// completeness claim; callers can create an identity map explicitly with
+    /// [`SourceMap::identity`].
+    pub fn source_map(&self) -> Option<&SourceMap> {
+        self.source_map.as_ref()
+    }
+
+    /// Borrow the original source snapshots retained by a prepared unit.
+    pub fn original_sources(&self) -> &[SourceSnapshot] {
+        self.source_map
+            .as_ref()
+            .map(SourceMap::original_sources)
+            .unwrap_or(&[])
+    }
+
+    /// Configuration identity for a prepared unit, or `None` for a raw unit.
+    pub fn configuration_id(&self) -> Option<&str> {
+        self.configuration_id.as_deref()
+    }
+
+    /// Explicit preparation fidelity for a prepared unit, or `None` for a raw
+    /// unit.
+    pub fn preparation_fidelity(&self) -> Option<PreparationFidelity> {
+        self.preparation_fidelity
+    }
+
+    /// Preparation provenance for a prepared unit, or `None` for a raw unit.
+    pub fn preparation_provenance(&self) -> Option<PreparationProvenance> {
+        self.preparation_provenance
+    }
+
+    /// Whether this unit was made from a strict prepared source.
+    pub fn is_prepared(&self) -> bool {
+        self.source_map.is_some()
     }
 }
 
@@ -239,6 +320,16 @@ pub enum ProjectSnapshotError {
     },
     /// A qualifier is empty or contains an empty dotted component.
     InvalidQualifier(String),
+    /// Two prepared units disagree about the configuration under which their
+    /// projections were made.
+    IncompatibleConfigurationIds {
+        unit_id: ProjectUnitId,
+        expected: String,
+        found: String,
+    },
+    /// An original source identity was reused with different bytes by
+    /// prepared units in one project snapshot.
+    ConflictingOriginalSource { source_id: ProjectSourceId },
 }
 
 impl fmt::Display for ProjectSnapshotError {
@@ -283,6 +374,20 @@ impl fmt::Display for ProjectSnapshotError {
             Self::InvalidQualifier(qualifier) => {
                 write!(formatter, "invalid authorized qualifier {:?}", qualifier)
             }
+            Self::IncompatibleConfigurationIds {
+                unit_id,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "prepared unit {:?} uses configuration {:?}, expected {:?}",
+                unit_id, found, expected
+            ),
+            Self::ConflictingOriginalSource { source_id } => write!(
+                formatter,
+                "original source ID {:?} has conflicting bytes in the project snapshot",
+                source_id
+            ),
         }
     }
 }
@@ -327,6 +432,8 @@ impl ProjectSnapshot {
     ) -> Result<Self, ProjectSnapshotError> {
         let mut unit_ids = HashSet::new();
         let mut source_ids = HashSet::new();
+        let mut original_bytes: HashMap<ProjectSourceId, Arc<[u8]>> = HashMap::new();
+        let mut configuration_id: Option<String> = None;
 
         for unit in &units {
             if unit.id.as_str().is_empty() {
@@ -351,6 +458,42 @@ impl ProjectSnapshot {
                     tree_range: root.start_byte()..root.end_byte(),
                     source_len: unit.source.len(),
                 });
+            }
+
+            if let Some(found) = unit.configuration_id() {
+                if let Some(expected) = configuration_id.as_deref() {
+                    if expected != found {
+                        return Err(ProjectSnapshotError::IncompatibleConfigurationIds {
+                            unit_id: unit.id.clone(),
+                            expected: expected.to_string(),
+                            found: found.to_string(),
+                        });
+                    }
+                } else {
+                    configuration_id = Some(found.to_string());
+                }
+            }
+
+            if let Some(previous) =
+                original_bytes.insert(unit.source_id.clone(), Arc::clone(&unit.source))
+            {
+                if previous.as_ref() != unit.source() {
+                    return Err(ProjectSnapshotError::ConflictingOriginalSource {
+                        source_id: unit.source_id.clone(),
+                    });
+                }
+            }
+            for original in unit.original_sources() {
+                if let Some(previous) = original_bytes.get(original.source_id()) {
+                    if previous.as_ref() != original.bytes() {
+                        return Err(ProjectSnapshotError::ConflictingOriginalSource {
+                            source_id: original.source_id().clone(),
+                        });
+                    }
+                } else {
+                    original_bytes
+                        .insert(original.source_id().clone(), Arc::from(original.bytes()));
+                }
             }
         }
 
@@ -411,6 +554,16 @@ impl ProjectSnapshot {
     /// Find a parsed unit by its stable caller-assigned ID.
     pub fn unit(&self, id: &ProjectUnitId) -> Option<&ProjectUnitInput> {
         self.units.iter().find(|unit| unit.id == *id)
+    }
+
+    /// The shared configuration identity of prepared units, if any.  Raw
+    /// units do not contribute an identity and may coexist with prepared
+    /// units; prepared units with different identities are rejected at
+    /// construction.
+    pub fn configuration_id(&self) -> Option<&str> {
+        self.units
+            .iter()
+            .find_map(ProjectUnitInput::configuration_id)
     }
 }
 

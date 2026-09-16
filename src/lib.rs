@@ -6,10 +6,19 @@ pub(crate) mod constructs;
 mod exception_types;
 pub mod factory;
 mod pascal_builder;
+pub mod prepared;
 pub mod project;
+pub mod source_map;
 
 pub use pascal_builder::{build_file_cfgs, build_file_cfgs_in_project};
+pub use prepared::{
+    PreparationFidelity, PreparationProvenance, PreparedSource, PreparedSourceError,
+};
 pub use project::{
     ImportBinding, ImportTarget, ProjectBuildError, ProjectSnapshot, ProjectSnapshotError,
     ProjectSourceId, ProjectUnitId, ProjectUnitInput, UsesSite,
+};
+pub use source_map::{
+    ExpansionId, MappedSourceSpan, MappedSpan, SourceMap, SourceMapError, SourceMapSegment,
+    SourceSegment, SourceSegmentKind, SourceSnapshot, SourceSnapshotError, SourceSpan,
 };

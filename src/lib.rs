@@ -12,7 +12,10 @@ pub mod source_map;
 
 pub use pascal_builder::{build_file_cfgs, build_file_cfgs_in_project};
 pub use prepared::{
-    PreparationFidelity, PreparationProvenance, PreparedSource, PreparedSourceError,
+    prepare_source, prepare_source_with_options, EnvironmentCompleteness, IncludeBinding,
+    PreparationBudget, PreparationEnvironment, PreparationFidelity, PreparationLimits,
+    PreparationOptions, PreparationProvenance, PrepareSourceError, PrepareSourceOptions,
+    PreparedSource, PreparedSourceError, ResolvedIncludeBinding,
 };
 pub use project::{
     ImportBinding, ImportTarget, ProjectBuildError, ProjectSnapshot, ProjectSnapshotError,

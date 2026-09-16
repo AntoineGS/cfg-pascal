@@ -5,6 +5,7 @@ use std::{
 
 use tree_sitter::Node;
 
+use crate::prepared::{is_preprocessor_kind, is_preprocessor_node};
 use crate::project::{import_site_spans, ImportTarget, ProjectSnapshot, ProjectUnitId};
 
 /// Stable identity for a class type in one project snapshot.
@@ -1164,7 +1165,7 @@ impl UnitTypeIndex {
             types: Vec::new(),
             unsupported_ranges: Vec::new(),
             with_ranges: Vec::new(),
-            has_preprocessor_barrier: contains_preprocessor_directive(root),
+            has_preprocessor_barrier: contains_preprocessor_directive(root, source),
             pending_method_owners: Vec::new(),
             interface_range: find_module_section(root, "interface"),
             parser_incomplete: root.has_error(),
@@ -1182,8 +1183,8 @@ impl UnitTypeIndex {
         source: &[u8],
         conditional: bool,
     ) {
-        let conditional = conditional || is_preprocessor_kind(node.kind());
-        if is_preprocessor_kind(node.kind()) {
+        let conditional = conditional || is_preprocessor_node(node, source);
+        if is_preprocessor_node(node, source) {
             self.has_preprocessor_barrier = true;
             self.unsupported_ranges
                 .push(node.start_byte()..node.end_byte());
@@ -1870,19 +1871,15 @@ fn import_section(root: Node, offset: usize) -> (ImportSection, usize) {
     (ImportSection::Module, root.start_byte())
 }
 
-fn contains_preprocessor_directive(node: Node) -> bool {
-    if is_preprocessor_kind(node.kind()) {
+fn contains_preprocessor_directive(node: Node, source: &[u8]) -> bool {
+    if is_preprocessor_node(node, source) {
         return true;
     }
     let mut cursor = node.walk();
     let result = node
         .children(&mut cursor)
-        .any(contains_preprocessor_directive);
+        .any(|child| contains_preprocessor_directive(child, source));
     result
-}
-
-fn is_preprocessor_kind(kind: &str) -> bool {
-    kind.starts_with("pp")
 }
 
 fn constructor_parts(node: Node, source: &[u8]) -> Option<Vec<String>> {

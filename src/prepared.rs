@@ -87,8 +87,8 @@ pub enum PreparedSourceError {
     ParserErrors { range: Range<usize> },
     /// The raw identity convenience path found an unresolved preprocessor
     /// node.  Callers that have resolved the directive must use
-    /// [`PreparedSource::new`]
-    /// with the resulting prepared bytes and source map instead.
+    /// [`PreparedSource::new`] with the resulting prepared bytes and source
+    /// map instead.
     UnresolvedPreprocessor {
         /// Byte range of the first preprocessor node.
         range: Range<usize>,
@@ -295,7 +295,7 @@ impl PreparedSource {
     ) -> Result<Self, PreparedSourceError> {
         let bytes_ref = bytes.as_ref();
         let tree = parse_clean(bytes_ref)?;
-        if let Some((range, node_kind)) = first_preprocessor_node(tree.root_node()) {
+        if let Some((range, node_kind)) = first_preprocessor_node(tree.root_node(), bytes_ref) {
             return Err(PreparedSourceError::UnresolvedPreprocessor { range, node_kind });
         }
         let snapshot = SourceSnapshot::new(source_id.clone(), bytes.as_ref());
@@ -398,16 +398,31 @@ fn parse_clean(bytes: &[u8]) -> Result<Tree, PreparedSourceError> {
     Ok(tree)
 }
 
-fn first_preprocessor_node(root: tree_sitter::Node<'_>) -> Option<(Range<usize>, String)> {
-    if root.kind().starts_with("pp") {
+fn first_preprocessor_node(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<(Range<usize>, String)> {
+    if is_preprocessor_node(root, source) {
         return Some((root.start_byte()..root.end_byte(), root.kind().to_string()));
     }
 
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        if let Some(found) = first_preprocessor_node(child) {
+        if let Some(found) = first_preprocessor_node(child, source) {
             return Some(found);
         }
     }
     None
+}
+
+pub(crate) fn is_preprocessor_node(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    is_preprocessor_kind(node.kind())
+        || (node.kind() == "comment"
+            && source
+                .get(node.byte_range())
+                .is_some_and(|bytes| bytes.starts_with(b"(*$")))
+}
+
+pub(crate) fn is_preprocessor_kind(kind: &str) -> bool {
+    kind.starts_with("pp")
 }

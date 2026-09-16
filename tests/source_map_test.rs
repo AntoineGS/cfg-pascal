@@ -5,7 +5,7 @@ use cfg_pascal::{
     build_file_cfgs, build_file_cfgs_in_project, ExpansionId, ImportBinding, ImportTarget,
     PreparationFidelity, PreparationProvenance, PreparedSource, ProjectSnapshot,
     ProjectSnapshotError, ProjectSourceId, ProjectUnitId, ProjectUnitInput, SourceMap,
-    SourceMapError, SourceMapSegment, SourceSegmentKind, SourceSnapshot, UsesSite,
+    SourceMapError, SourceMapSegment, SourceSegmentKind, SourceSnapshot, SourceSpan, UsesSite,
 };
 use tree_sitter::{Node, Parser, Tree};
 
@@ -238,6 +238,34 @@ fn source_map_rejects_reused_origin_ranges_and_mixed_expansion_sources() {
         SourceMapError::OverlappingOriginalRanges { .. }
     ));
 
+    let partial_overlap = SourceMap::new(
+        b"abbc",
+        vec![source("inc.pas", b"abc")],
+        vec![
+            copied(0..2, "inc.pas", 0..2, "same-occurrence"),
+            copied(2..4, "inc.pas", 1..3, "same-occurrence"),
+        ],
+    );
+    let error = partial_overlap.expect_err("partially overlapping origins must be rejected");
+    assert!(matches!(
+        error,
+        SourceMapError::OverlappingOriginalRanges { .. }
+    ));
+
+    let containing_overlap = SourceMap::new(
+        b"abcb",
+        vec![source("inc.pas", b"abc")],
+        vec![
+            copied(0..3, "inc.pas", 0..3, "same-occurrence"),
+            copied(3..4, "inc.pas", 1..2, "same-occurrence"),
+        ],
+    );
+    let error = containing_overlap.expect_err("contained origins must be rejected");
+    assert!(matches!(
+        error,
+        SourceMapError::OverlappingOriginalRanges { .. }
+    ));
+
     let masked_overlap = SourceMap::new(
         b"  ",
         vec![source("inc.pas", b"ab")],
@@ -265,6 +293,32 @@ fn source_map_rejects_reused_origin_ranges_and_mixed_expansion_sources() {
         error,
         SourceMapError::ExpansionSourceMismatch { .. }
     ));
+}
+
+#[test]
+fn source_map_accepts_fine_grained_and_reversed_disjoint_original_ranges() {
+    let segment_count = 160_000;
+    let bytes = vec![b'x'; segment_count];
+    let segments = (0..segment_count)
+        .map(|offset| copied(offset..offset + 1, "fine.pas", offset..offset + 1, "root"))
+        .collect();
+    let map = SourceMap::new(&bytes, vec![source("fine.pas", &bytes)], segments)
+        .expect("fine-grained disjoint mappings are valid");
+    assert_eq!(map.segments().len(), segment_count);
+
+    let reversed = SourceMap::new(
+        b"ba",
+        vec![source("reversed.pas", b"ab")],
+        vec![
+            copied(0..1, "reversed.pas", 1..2, "root"),
+            copied(1..2, "reversed.pas", 0..1, "root"),
+        ],
+    )
+    .expect("disjoint original ranges remain valid in source-order reversal");
+    assert_eq!(
+        reversed.map_range(0..2).unwrap()[0].original,
+        Some(SourceSpan::new(ProjectSourceId::new("reversed.pas"), 1..2))
+    );
 }
 
 #[test]
@@ -521,6 +575,37 @@ fn identity_rejects_unresolved_preprocessor_content_instead_of_claiming_complete
     )
     .expect("a parse-clean source without preprocessor nodes is a valid identity");
     assert_eq!(clean_identity.provenance(), PreparationProvenance::Raw);
+
+    let comment_style = b"program Demo; begin\n(*$I missing.inc*)\nend.";
+    let error = PreparedSource::identity(
+        ProjectSourceId::new("comment-style.pas"),
+        comment_style,
+        "debug",
+    )
+    .expect_err("comment-style include directives must not become complete");
+    assert!(matches!(
+        error,
+        cfg_pascal::PreparedSourceError::UnresolvedPreprocessor { .. }
+    ));
+
+    let ordinary_comment = PreparedSource::identity(
+        ProjectSourceId::new("ordinary-comment.pas"),
+        b"program Comment; begin (* ordinary comment *) end.",
+        "debug",
+    )
+    .expect("ordinary comments are not preprocessor directives");
+    assert_eq!(ordinary_comment.provenance(), PreparationProvenance::Raw);
+
+    let directive_like_string = PreparedSource::identity(
+        ProjectSourceId::new("directive-string.pas"),
+        b"program StringLiteral; begin WriteLn('(*$I missing.inc*)'); end.",
+        "debug",
+    )
+    .expect("directive-like text inside strings is not a preprocessor directive");
+    assert_eq!(
+        directive_like_string.provenance(),
+        PreparationProvenance::Raw
+    );
 }
 
 #[test]

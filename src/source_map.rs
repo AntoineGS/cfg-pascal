@@ -652,21 +652,10 @@ impl SourceMap {
                             original_range: original_range.clone(),
                         });
                     }
-                    let ranges = original_ranges
+                    original_ranges
                         .entry((original.source_id.clone(), segment.expansion_id.clone()))
-                        .or_default();
-                    if let Some(previous) = ranges
-                        .iter()
-                        .find(|previous| ranges_overlap(previous, original_range))
-                    {
-                        return Err(SourceMapError::OverlappingOriginalRanges {
-                            source_id: original.source_id.clone(),
-                            expansion_id: segment.expansion_id.clone(),
-                            previous: previous.clone(),
-                            next: original_range.clone(),
-                        });
-                    }
-                    ranges.push(original_range.clone());
+                        .or_default()
+                        .push(original_range.clone());
 
                     match kind {
                         SourceSegmentKind::Copied => {
@@ -702,6 +691,23 @@ impl SourceMap {
                 actual_start: expected_start,
                 prepared_len,
             });
+        }
+
+        // Keep the public segment order intact.  Original ranges are grouped
+        // and sorted only for this validation pass, so discontiguous segments
+        // around nested occurrences and source-order reversals remain valid.
+        for ((source_id, expansion_id), ranges) in &mut original_ranges {
+            ranges.sort_unstable_by_key(|range| (range.start, range.end));
+            for pair in ranges.windows(2) {
+                if ranges_overlap(&pair[0], &pair[1]) {
+                    return Err(SourceMapError::OverlappingOriginalRanges {
+                        source_id: source_id.clone(),
+                        expansion_id: expansion_id.clone(),
+                        previous: pair[0].clone(),
+                        next: pair[1].clone(),
+                    });
+                }
+            }
         }
 
         Ok(Self {

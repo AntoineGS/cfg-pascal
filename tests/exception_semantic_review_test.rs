@@ -1,5 +1,8 @@
 use cfg_core::{BlockId, Cfg, EdgeKind};
-use cfg_pascal::build_file_cfgs;
+use cfg_pascal::{
+    build_file_cfgs, build_file_cfgs_in_project, ProjectSnapshot, ProjectSourceId, ProjectUnitId,
+    ProjectUnitInput,
+};
 use tree_sitter::{Parser, Tree};
 
 fn parse_clean(source: &str) -> Tree {
@@ -571,6 +574,55 @@ end.
     let successful_successors = successors(cfg, successful_raise);
     assert!(successful_successors.contains(&(handler, EdgeKind::ExceptionThrow)));
     assert!(successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
+fn comment_style_preprocessor_directives_keep_raw_and_project_dispatch_unknown() {
+    let source = r#"
+unit CommentStylePreprocessorBarrier;
+interface
+(*$IFDEF MODERN*)
+type
+  E = class constructor Create; end;
+(*$ENDIF*)
+implementation
+procedure P;
+begin
+  try
+    raise E.Create;
+  except
+    on E do Handle;
+  end;
+end;
+end.
+"#;
+    let tree = parse_clean(source);
+    let assert_unknown = |cfgs: &[Cfg]| {
+        let cfg = cfg_for(cfgs, "P");
+        let raise = block_with_stmt(cfg, source, "raise", "raise E.Create");
+        let successful_raise = successful_raise_block(cfg, raise);
+        let handler = block_with_stmt(cfg, source, "statement", "Handle");
+        let successful_successors = successors(cfg, successful_raise);
+        assert!(successful_successors.contains(&(handler, EdgeKind::ExceptionThrow)));
+        assert!(
+            successful_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)),
+            "comment-style preprocessor directives must remain a file-wide barrier"
+        );
+    };
+
+    let raw_cfgs = build_file_cfgs(&tree, source.as_bytes());
+    assert_unknown(&raw_cfgs);
+
+    let unit = ProjectUnitInput::new(
+        ProjectUnitId::new("comment-style"),
+        ProjectSourceId::new("comment-style.pas"),
+        tree,
+        source.as_bytes(),
+    );
+    let snapshot = ProjectSnapshot::new(vec![unit], Vec::new()).unwrap();
+    let project_cfgs =
+        build_file_cfgs_in_project(&snapshot, &ProjectUnitId::new("comment-style")).unwrap();
+    assert_unknown(&project_cfgs);
 }
 
 #[test]

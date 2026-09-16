@@ -1,8 +1,10 @@
+use std::process::Command;
+
 use cfg_core::{BlockId, Cfg, EdgeKind};
 use cfg_pascal::{
     build_file_cfgs_in_project, prepare_source, ImportBinding, ImportTarget, IncludeBinding,
-    PreparationEnvironment, PrepareSourceOptions, ProjectSnapshot, ProjectSourceId, ProjectUnitId,
-    ProjectUnitInput, SourceSnapshot, UsesSite,
+    PreparationEnvironment, PrepareSourceOptions, PreparedSource, ProjectSnapshot, ProjectSourceId,
+    ProjectUnitId, ProjectUnitInput, SourceSegmentKind, SourceSnapshot, UsesSite,
 };
 
 fn source(id: &str, bytes: &[u8]) -> SourceSnapshot {
@@ -229,6 +231,171 @@ end.
     assert_eq!(mapped[0].original.as_ref().unwrap().source_id, included_id);
     assert_ne!(mapped[0].expansion_id, cfg_pascal::ExpansionId::root());
     assert_eq!(mapped[0].original.as_ref().unwrap().byte_range, 2..10);
+}
+
+#[test]
+fn include_eof_line_comment_gets_a_synthetic_separator_before_parent_text() {
+    let root = b"program Demo; begin {$I body.inc} Writeln('keep'); end.";
+    let included = b"// included comment";
+    let root_id = ProjectSourceId::new("root.pas");
+    let included_id = ProjectSourceId::new("body.inc");
+    let include = b"{$I body.inc}";
+    let prepared = prepare_source(
+        &root_id,
+        &[
+            source(root_id.as_str(), root),
+            source(included_id.as_str(), included),
+        ],
+        &[IncludeBinding::new(
+            root_id.clone(),
+            directive_range(root, include),
+            included_id.clone(),
+        )],
+        options(),
+    )
+    .expect("EOF line-comment include should preserve parent text");
+
+    let comment_end = prepared
+        .bytes()
+        .windows(included.len())
+        .position(|window| window == included)
+        .expect("included comment")
+        + included.len();
+    assert_eq!(prepared.bytes().get(comment_end), Some(&b'\n'));
+    let separator = prepared
+        .map_range(comment_end..comment_end + 1)
+        .expect("synthetic include separator");
+    assert_eq!(separator.len(), 1);
+    assert_eq!(separator[0].kind, SourceSegmentKind::Synthetic);
+    assert!(separator[0].original.is_none());
+
+    let keep_start = prepared
+        .bytes()
+        .windows(b"Writeln('keep');".len())
+        .position(|window| window == b"Writeln('keep');")
+        .expect("parent text after include");
+    assert!(keep_start > comment_end);
+    assert!(prepared.tree().root_node().to_sexp().contains("exprCall"));
+}
+
+#[test]
+fn include_eof_keyword_gets_a_separator_before_parent_expression() {
+    let root = b"program Demo; begin {$I body.inc}E.Create; end.";
+    let included = b"raise";
+    let root_id = ProjectSourceId::new("root.pas");
+    let included_id = ProjectSourceId::new("body.inc");
+    let include = b"{$I body.inc}";
+    let prepared = prepare_source(
+        &root_id,
+        &[
+            source(root_id.as_str(), root),
+            source(included_id.as_str(), included),
+        ],
+        &[IncludeBinding::new(
+            root_id.clone(),
+            directive_range(root, include),
+            included_id.clone(),
+        )],
+        options(),
+    )
+    .expect("EOF keyword include should preserve the parent token boundary");
+
+    let raise_start = prepared
+        .bytes()
+        .windows(included.len())
+        .position(|window| window == included)
+        .expect("included keyword");
+    assert!(prepared
+        .bytes()
+        .get(raise_start + included.len())
+        .is_some_and(u8::is_ascii_whitespace));
+    assert!(prepared.tree().root_node().to_sexp().contains("kRaise"));
+}
+
+#[test]
+fn include_eof_separator_preserves_downstream_missing_import_uncertainty() {
+    let known =
+        b"unit Known; interface type TError = class constructor Create; end; implementation end.";
+    let root = br#"unit D; interface uses Known; implementation
+{$I x}uses Missing;
+type TAlias = TError;
+procedure P; begin try raise TAlias.Create; except on Known.TError do Handle; end; end; end."#;
+    let included = b"//comment";
+    let root_id = ProjectSourceId::new("root");
+    let included_id = ProjectSourceId::new("inc");
+    let root_unit_id = ProjectUnitId::new("d");
+    let include = b"{$I x}";
+    let prepared = prepare_source(
+        &root_id,
+        &[
+            source(root_id.as_str(), root),
+            source(included_id.as_str(), included),
+        ],
+        &[IncludeBinding::new(
+            root_id.clone(),
+            directive_range(root, include),
+            included_id,
+        )],
+        options(),
+    )
+    .expect("include separator should preserve the following uses clause");
+
+    let known_start = prepared
+        .bytes()
+        .windows(b"Known".len())
+        .position(|window| window == b"Known")
+        .expect("Known import");
+    let missing_start = prepared
+        .bytes()
+        .windows(b"Missing".len())
+        .position(|window| window == b"Missing")
+        .expect("Missing import");
+    let known_prepared =
+        PreparedSource::identity(ProjectSourceId::new("known-source"), known, "debug")
+            .expect("known source");
+    let snapshot = ProjectSnapshot::new(
+        vec![
+            ProjectUnitInput::from_prepared(ProjectUnitId::new("known"), known_prepared),
+            ProjectUnitInput::from_prepared(root_unit_id.clone(), prepared),
+        ],
+        vec![
+            ImportBinding::new(
+                UsesSite::new(
+                    root_unit_id.clone(),
+                    known_start..known_start + b"Known".len(),
+                ),
+                ImportTarget::Loaded(ProjectUnitId::new("known")),
+                ["Known"],
+            ),
+            ImportBinding::new(
+                UsesSite::new(
+                    root_unit_id.clone(),
+                    missing_start..missing_start + b"Missing".len(),
+                ),
+                ImportTarget::Unavailable,
+                ["Missing"],
+            ),
+        ],
+    )
+    .expect("the resumed uses clause should be a real project import");
+
+    let cfgs = build_file_cfgs_in_project(&snapshot, &root_unit_id).expect("project CFGs");
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_text(
+        cfg,
+        snapshot.unit(&root_unit_id).unwrap().source(),
+        "raise",
+        "raise TAlias.Create",
+    );
+    let successful_raise = successful_raise_block(cfg, raise);
+    let handler = block_with_text(
+        cfg,
+        snapshot.unit(&root_unit_id).unwrap().source(),
+        "statement",
+        "Handle",
+    );
+    assert!(successors(cfg, successful_raise).contains(&(handler, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, successful_raise).contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
 }
 
 #[test]
@@ -505,6 +672,60 @@ end.
         ),
         Err(cfg_pascal::PrepareSourceError::IncludeBindingNotIncludeDirective { .. })
     ));
+
+    let malformed_root = b"program Demo; begin {$I 'unterminated} end.";
+    let malformed_binding = IncludeBinding::new(
+        root_id.clone(),
+        directive_range(malformed_root, b"{$I 'unterminated}"),
+        ProjectSourceId::new("selected.inc"),
+    );
+    assert!(matches!(
+        prepare_source(
+            &root_id,
+            &[
+                source("root.pas", malformed_root),
+                source("selected.inc", b"Body;")
+            ],
+            &[malformed_binding],
+            options(),
+        ),
+        Err(cfg_pascal::PrepareSourceError::InvalidDirective { .. })
+    ));
+
+    let quoted_root = b"program Demo; begin {$I 'selected.inc'} {$INCLUDE \"other.inc\"} end.";
+    let selected_id = ProjectSourceId::new("selected.inc");
+    let other_id = ProjectSourceId::new("other.inc");
+    let quoted_bindings = [
+        IncludeBinding::new(
+            root_id.clone(),
+            directive_range(quoted_root, b"{$I 'selected.inc'}"),
+            selected_id.clone(),
+        ),
+        IncludeBinding::new(
+            root_id.clone(),
+            directive_range(quoted_root, b"{$INCLUDE \"other.inc\"}"),
+            other_id.clone(),
+        ),
+    ];
+    let quoted = prepare_source(
+        &root_id,
+        &[
+            source("root.pas", quoted_root),
+            source(selected_id.as_str(), b"Selected;"),
+            source(other_id.as_str(), b"Other;"),
+        ],
+        &quoted_bindings,
+        options(),
+    )
+    .expect("balanced quoted include paths are supported");
+    assert!(quoted
+        .bytes()
+        .windows(b"Selected;".len())
+        .any(|w| w == b"Selected;"));
+    assert!(quoted
+        .bytes()
+        .windows(b"Other;".len())
+        .any(|w| w == b"Other;"));
 }
 
 #[test]
@@ -528,6 +749,17 @@ fn active_unsupported_effectful_directives_and_malformed_nesting_fail_strictly()
         options(),
     )
     .expect("unsupported directives in inactive branches are not effects");
+
+    let lexical_fragment = b"program Demo; {$IFDEF_FEATURE} Drop; {$ELSE} Keep; {$ENDIF} end.";
+    assert!(matches!(
+        prepare_source(
+            ProjectSourceId::new("root.pas"),
+            &[source("root.pas", lexical_fragment)],
+            &[],
+            options(),
+        ),
+        Err(cfg_pascal::PrepareSourceError::UnsupportedDirective { .. })
+    ));
 
     let unmatched_end = b"program Demo; {$ENDIF} begin end.";
     assert!(matches!(
@@ -754,6 +986,46 @@ fn configured_budgets_fail_deterministically_before_unbounded_growth() {
         error,
         cfg_pascal::PrepareSourceError::BudgetExceeded {
             budget: cfg_pascal::PreparationBudget::ExpandedOccurrences,
+            ..
+        }
+    ));
+
+    let repeated_root = b"program Demo; {$I x}{$I x}{$I x}{$I x} begin end.";
+    let repeated_target = format!("{{$DEFINE {}}}", "A".repeat(10_000));
+    let repeated_root_id = ProjectSourceId::new("repeated-root.pas");
+    let repeated_target_id = ProjectSourceId::new("repeated.inc");
+    let repeated_bindings: Vec<_> = std::str::from_utf8(repeated_root)
+        .unwrap()
+        .match_indices("{$I x}")
+        .map(|(start, _)| {
+            IncludeBinding::new(
+                repeated_root_id.clone(),
+                start..start + b"{$I x}".len(),
+                repeated_target_id.clone(),
+            )
+        })
+        .collect();
+    let mut repeated_options = options();
+    repeated_options.limits.max_work = 20_000;
+    let error = match prepare_source(
+        &repeated_root_id,
+        &[
+            source(repeated_root_id.as_str(), repeated_root),
+            source(repeated_target_id.as_str(), repeated_target.as_bytes()),
+        ],
+        &repeated_bindings,
+        repeated_options,
+    ) {
+        Ok(prepared) => panic!(
+            "repeated directive bodies were not charged: {} output bytes",
+            prepared.bytes().len()
+        ),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        cfg_pascal::PrepareSourceError::BudgetExceeded {
+            budget: cfg_pascal::PreparationBudget::Work,
             ..
         }
     ));
@@ -1075,7 +1347,11 @@ end.
         ProjectSourceId::new("demo.pas"),
         &[source("demo.pas", bytes)],
         &[],
-        options(),
+        PrepareSourceOptions::new(
+            ProjectSourceId::new("demo.prepared"),
+            "debug",
+            PreparationEnvironment::Partial,
+        ),
     )
     .expect("short-circuiting conditions are known");
 
@@ -1105,6 +1381,51 @@ fn long_boolean_chains_are_evaluated_without_recursive_ast_walks() {
         .bytes()
         .windows(b"Keep".len())
         .any(|w| w == b"Keep"));
+}
+
+#[test]
+fn large_flat_boolean_chain_is_stack_safe_under_default_limits_in_a_subprocess() {
+    const STACK_PROBE: &str = "CFG_PASCAL_PREPARATION_STACK_PROBE";
+    if std::env::var_os(STACK_PROBE).is_some() {
+        let joined = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let expression = format!("TRUE{}", " AND TRUE".repeat(100_000));
+                let bytes =
+                    format!("program Demo; {{$IF {expression}}} begin Keep; end. {{$ENDIF}}");
+                let prepared = prepare_source(
+                    ProjectSourceId::new("large-condition.pas"),
+                    &[source("large-condition.pas", bytes.as_bytes())],
+                    &[],
+                    options(),
+                )
+                .expect("default limits should not abort on a flat boolean chain");
+                assert!(prepared
+                    .bytes()
+                    .windows(b"Keep".len())
+                    .any(|w| w == b"Keep"));
+            })
+            .expect("spawn small-stack probe")
+            .join();
+        assert!(joined.is_ok(), "small-stack probe panicked: {joined:?}");
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "large_flat_boolean_chain_is_stack_safe_under_default_limits_in_a_subprocess",
+            "--nocapture",
+        ])
+        .env(STACK_PROBE, "1")
+        .output()
+        .expect("run small-stack subprocess");
+    assert!(
+        output.status.success(),
+        "small-stack subprocess failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

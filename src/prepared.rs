@@ -947,7 +947,7 @@ struct IncludeKey {
 struct RawDirective {
     range: Range<usize>,
     argument_range: Range<usize>,
-    keyword: String,
+    keyword_range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1105,50 +1105,54 @@ impl SymbolEnvironment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ConditionExpr {
+struct ConditionExpr {
+    operations: Vec<ConditionOp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConditionOp {
     Literal(bool),
     Defined(String),
-    Not(Box<ConditionExpr>),
-    And(Box<ConditionExpr>, Box<ConditionExpr>),
-    Or(Box<ConditionExpr>, Box<ConditionExpr>),
+    Not,
+    And,
+    Or,
 }
 
 impl ConditionExpr {
-    fn evaluate(&self, symbols: &SymbolEnvironment) -> TriState {
-        enum Task<'a> {
-            Evaluate(&'a ConditionExpr),
-            ApplyNot,
-            AndAfterLeft(&'a ConditionExpr),
-            AndAfterRight(TriState),
-            OrAfterLeft(&'a ConditionExpr),
-            OrAfterRight(TriState),
+    fn literal(value: bool) -> Self {
+        Self {
+            operations: vec![ConditionOp::Literal(value)],
         }
+    }
 
-        let mut tasks = vec![Task::Evaluate(self)];
-        let mut values = Vec::new();
-        while let Some(task) = tasks.pop() {
-            match task {
-                Task::Evaluate(expression) => match expression {
-                    Self::Literal(value) => values.push(if *value {
-                        TriState::True
-                    } else {
-                        TriState::False
-                    }),
-                    Self::Defined(symbol) => values.push(symbols.state(symbol)),
-                    Self::Not(value) => {
-                        tasks.push(Task::ApplyNot);
-                        tasks.push(Task::Evaluate(value));
-                    }
-                    Self::And(left, right) => {
-                        tasks.push(Task::AndAfterLeft(right));
-                        tasks.push(Task::Evaluate(left));
-                    }
-                    Self::Or(left, right) => {
-                        tasks.push(Task::OrAfterLeft(right));
-                        tasks.push(Task::Evaluate(left));
-                    }
-                },
-                Task::ApplyNot => {
+    fn defined(symbol: String) -> Self {
+        Self {
+            operations: vec![ConditionOp::Defined(symbol)],
+        }
+    }
+
+    fn not(mut expression: Self) -> Self {
+        expression.operations.push(ConditionOp::Not);
+        expression
+    }
+
+    fn combine(mut left: Self, right: Self, operator: ConditionOp) -> Self {
+        left.operations.extend(right.operations);
+        left.operations.push(operator);
+        left
+    }
+
+    fn evaluate(&self, symbols: &SymbolEnvironment) -> TriState {
+        let mut values = Vec::with_capacity(self.operations.len());
+        for operation in &self.operations {
+            match operation {
+                ConditionOp::Literal(value) => values.push(if *value {
+                    TriState::True
+                } else {
+                    TriState::False
+                }),
+                ConditionOp::Defined(symbol) => values.push(symbols.state(symbol)),
+                ConditionOp::Not => {
                     let value = values.pop().unwrap_or(TriState::Unknown);
                     values.push(match value {
                         TriState::True => TriState::False,
@@ -1156,18 +1160,9 @@ impl ConditionExpr {
                         TriState::Unknown => TriState::Unknown,
                     });
                 }
-                Task::AndAfterLeft(right) => {
-                    let left = values.pop().unwrap_or(TriState::Unknown);
-                    match left {
-                        TriState::False => values.push(TriState::False),
-                        TriState::True | TriState::Unknown => {
-                            tasks.push(Task::AndAfterRight(left));
-                            tasks.push(Task::Evaluate(right));
-                        }
-                    }
-                }
-                Task::AndAfterRight(left) => {
+                ConditionOp::And => {
                     let right = values.pop().unwrap_or(TriState::Unknown);
+                    let left = values.pop().unwrap_or(TriState::Unknown);
                     values.push(match (left, right) {
                         (TriState::False, _) => TriState::False,
                         (TriState::True, right) => right,
@@ -1177,18 +1172,9 @@ impl ConditionExpr {
                         }
                     });
                 }
-                Task::OrAfterLeft(right) => {
-                    let left = values.pop().unwrap_or(TriState::Unknown);
-                    match left {
-                        TriState::True => values.push(TriState::True),
-                        TriState::False | TriState::Unknown => {
-                            tasks.push(Task::OrAfterRight(left));
-                            tasks.push(Task::Evaluate(right));
-                        }
-                    }
-                }
-                Task::OrAfterRight(left) => {
+                ConditionOp::Or => {
                     let right = values.pop().unwrap_or(TriState::Unknown);
+                    let left = values.pop().unwrap_or(TriState::Unknown);
                     values.push(match (left, right) {
                         (TriState::True, _) => TriState::True,
                         (TriState::False, right) => right,
@@ -1232,6 +1218,7 @@ struct SourceFrame {
     expansion_id: ExpansionId,
     item_index: usize,
     include_depth: usize,
+    output_start: usize,
 }
 
 /// Prepare one root source using only immutable caller-supplied snapshots and
@@ -1337,6 +1324,7 @@ where
         expansion_id: ExpansionId::root(),
         item_index: 0,
         include_depth: 0,
+        output_start: 0,
     }];
     let mut include_chain = vec![root_source_id.clone()];
 
@@ -1345,8 +1333,25 @@ where
         let source_id = stack[frame_index].source_id.clone();
         let item_count = catalog.lexed(&source_id).items.len();
         if stack[frame_index].item_index == item_count {
-            stack.pop();
+            let frame = stack.pop().expect("source frame exists");
             include_chain.pop();
+            if frame.include_depth > 0
+                && output.len() > frame.output_start
+                && !matches!(output.last(), Some(b'\r' | b'\n'))
+            {
+                append_synthetic(
+                    &mut output,
+                    &mut segments,
+                    &frame.source_id,
+                    frame.expansion_id,
+                    catalog
+                        .source(&source_id)
+                        .expect("completed frame source remains loaded")
+                        .len(),
+                    &mut usage,
+                    limits,
+                )?;
+            }
             continue;
         }
 
@@ -1438,7 +1443,12 @@ where
                     }
                     DirectiveCommand::ElseIf(condition) => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err(malformed_directive(&source_id, raw.range.clone(), &raw));
+                            return Err(malformed_directive(
+                                &source_id,
+                                raw.range.clone(),
+                                &raw,
+                                source,
+                            ));
                         };
                         if frame.saw_else {
                             return Err(PrepareSourceError::MalformedNesting {
@@ -1471,7 +1481,12 @@ where
                     }
                     DirectiveCommand::Else => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err(malformed_directive(&source_id, raw.range.clone(), &raw));
+                            return Err(malformed_directive(
+                                &source_id,
+                                raw.range.clone(),
+                                &raw,
+                                source,
+                            ));
                         };
                         if frame.saw_else {
                             return Err(PrepareSourceError::MalformedNesting {
@@ -1495,7 +1510,12 @@ where
                     }
                     DirectiveCommand::EndIf => {
                         if conditionals.pop().is_none() {
-                            return Err(malformed_directive(&source_id, raw.range.clone(), &raw));
+                            return Err(malformed_directive(
+                                &source_id,
+                                raw.range.clone(),
+                                &raw,
+                                source,
+                            ));
                         }
                         append_masked(
                             &mut output,
@@ -1602,6 +1622,7 @@ where
                             expansion_id: child_expansion,
                             item_index: 0,
                             include_depth: depth,
+                            output_start: output.len(),
                         });
                         include_chain.push(target_source_id);
                     }
@@ -1728,7 +1749,7 @@ fn charge_directive(
         source_id,
         range.clone(),
     )?;
-    charge_work(usage, 1, limits, source_id, range)
+    charge_work(usage, range.len(), limits, source_id, range)
 }
 
 fn charge_expression(
@@ -1815,7 +1836,8 @@ fn validate_include_bindings(
             .source(source_id)
             .expect("binding source remains loaded after lexing");
         let argument = trim_range(source.bytes(), directive.argument_range.clone());
-        let is_include = matches!(directive.keyword.as_str(), "I" | "INCLUDE")
+        let is_include = (keyword_is(source.bytes(), directive.keyword_range.clone(), b"I")
+            || keyword_is(source.bytes(), directive.keyword_range.clone(), b"INCLUDE"))
             && !argument.is_empty()
             && !matches!(source.bytes().get(argument.start), Some(b'+' | b'-'));
         if !is_include {
@@ -1823,6 +1845,14 @@ fn validate_include_bindings(
                 source_id: source_id.clone(),
                 range: binding.directive_range.clone(),
             });
+        }
+        if let Err(message) = validate_include_argument(source.bytes(), argument.clone()) {
+            return Err(invalid_directive(
+                source_id,
+                binding.directive_range.clone(),
+                source_text(source.bytes(), directive.range.clone()),
+                message,
+            ));
         }
         if catalog.source(&binding.target_source_id).is_none() {
             return Err(PrepareSourceError::IncludeTargetNotLoaded {
@@ -1909,17 +1939,13 @@ fn lex_source(
         let keyword_start = skip_ascii_whitespace(source, body_start);
         let keyword_end = source[keyword_start..end]
             .iter()
-            .position(|byte| !byte.is_ascii_alphabetic())
+            .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
             .map(|offset| keyword_start + offset)
             .unwrap_or(end);
-        let keyword = source[keyword_start..keyword_end]
-            .iter()
-            .map(|byte| byte.to_ascii_uppercase() as char)
-            .collect::<String>();
         let raw = RawDirective {
             range: cursor..end_exclusive,
             argument_range: keyword_end..end,
-            keyword,
+            keyword_range: keyword_start..keyword_end,
         };
         if directives.len() >= limits.max_directives {
             return Err(PrepareSourceError::BudgetExceeded {
@@ -1951,23 +1977,24 @@ fn parse_directive(
     let directive = source_text(source, raw.range.clone());
     let argument_range = trim_range(source, raw.argument_range.clone());
     let argument = source_text(source, argument_range.clone());
-    match raw.keyword.as_str() {
-        "IFDEF" => Ok(DirectiveCommand::If(ConditionExpr::Defined(parse_symbol(
+    let keyword = keyword_text(source, raw.keyword_range.clone());
+    match keyword.as_str() {
+        "IFDEF" => Ok(DirectiveCommand::If(ConditionExpr::defined(parse_symbol(
             source,
             argument_range,
             source_id,
             raw.range.clone(),
             &directive,
         )?))),
-        "IFNDEF" => Ok(DirectiveCommand::If(ConditionExpr::Not(Box::new(
-            ConditionExpr::Defined(parse_symbol(
+        "IFNDEF" => Ok(DirectiveCommand::If(ConditionExpr::not(
+            ConditionExpr::defined(parse_symbol(
                 source,
                 argument_range,
                 source_id,
                 raw.range.clone(),
                 &directive,
             )?),
-        )))),
+        ))),
         "IF" => Ok(DirectiveCommand::If(parse_expression(
             source,
             argument_range,
@@ -2029,6 +2056,13 @@ fn parse_directive(
                 || matches!(source.get(argument_range.start), Some(b'+' | b'-'))
             {
                 Ok(DirectiveCommand::Unsupported(directive))
+            } else if let Err(message) = validate_include_argument(source, argument_range.clone()) {
+                Err(invalid_directive(
+                    source_id,
+                    raw.range.clone(),
+                    directive,
+                    message,
+                ))
             } else {
                 Ok(DirectiveCommand::Include(argument))
             }
@@ -2215,7 +2249,7 @@ impl<'a> ExpressionParser<'a> {
         let mut expression = self.parse_and(depth)?;
         while self.take(|kind| matches!(kind, ExprTokenKind::Or)) {
             let right = self.parse_and(depth)?;
-            expression = ConditionExpr::Or(Box::new(expression), Box::new(right));
+            expression = ConditionExpr::combine(expression, right, ConditionOp::Or);
         }
         Ok(expression)
     }
@@ -2224,7 +2258,7 @@ impl<'a> ExpressionParser<'a> {
         let mut expression = self.parse_not(depth)?;
         while self.take(|kind| matches!(kind, ExprTokenKind::And)) {
             let right = self.parse_not(depth)?;
-            expression = ConditionExpr::And(Box::new(expression), Box::new(right));
+            expression = ConditionExpr::combine(expression, right, ConditionOp::And);
         }
         Ok(expression)
     }
@@ -2232,7 +2266,7 @@ impl<'a> ExpressionParser<'a> {
     fn parse_not(&mut self, depth: usize) -> Result<ConditionExpr, PrepareSourceError> {
         if self.take(|kind| matches!(kind, ExprTokenKind::Not)) {
             self.ensure_depth(depth + 1)?;
-            return Ok(ConditionExpr::Not(Box::new(self.parse_not(depth + 1)?)));
+            return Ok(ConditionExpr::not(self.parse_not(depth + 1)?));
         }
         self.parse_primary(depth)
     }
@@ -2242,8 +2276,8 @@ impl<'a> ExpressionParser<'a> {
             return Err(self.invalid("expected condition operand"));
         };
         match token.kind {
-            ExprTokenKind::True => Ok(ConditionExpr::Literal(true)),
-            ExprTokenKind::False => Ok(ConditionExpr::Literal(false)),
+            ExprTokenKind::True => Ok(ConditionExpr::literal(true)),
+            ExprTokenKind::False => Ok(ConditionExpr::literal(false)),
             ExprTokenKind::Defined => {
                 if !self.take(|kind| matches!(kind, ExprTokenKind::LeftParen)) {
                     return Err(self.invalid("Defined must be followed by (name)"));
@@ -2257,7 +2291,7 @@ impl<'a> ExpressionParser<'a> {
                 if !self.take(|kind| matches!(kind, ExprTokenKind::RightParen)) {
                     return Err(self.invalid("Defined requires a closing parenthesis"));
                 }
-                Ok(ConditionExpr::Defined(symbol))
+                Ok(ConditionExpr::defined(symbol))
             }
             ExprTokenKind::LeftParen => {
                 self.ensure_depth(depth + 1)?;
@@ -2357,11 +2391,67 @@ fn malformed_directive(
     source_id: &ProjectSourceId,
     range: Range<usize>,
     raw: &RawDirective,
+    source: &[u8],
 ) -> PrepareSourceError {
     PrepareSourceError::MalformedNesting {
         source_id: source_id.clone(),
         range,
-        directive: raw.keyword.clone(),
+        directive: keyword_text(source, raw.keyword_range.clone()),
+    }
+}
+
+fn keyword_text(source: &[u8], range: Range<usize>) -> String {
+    source[range]
+        .iter()
+        .map(|byte| byte.to_ascii_uppercase() as char)
+        .collect()
+}
+
+fn keyword_is(source: &[u8], range: Range<usize>, expected: &[u8]) -> bool {
+    range.len() == expected.len()
+        && source[range]
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.to_ascii_uppercase() == *expected)
+}
+
+fn validate_include_argument(source: &[u8], range: Range<usize>) -> Result<(), &'static str> {
+    let Some(&first) = source.get(range.start) else {
+        return Err("include path must not be empty");
+    };
+    if matches!(first, b'\'' | b'"') {
+        let quote = first;
+        let mut cursor = range.start + 1;
+        let content_start = cursor;
+        while cursor < range.end {
+            match source[cursor] {
+                byte if byte == quote => {
+                    if source.get(cursor + 1) == Some(&quote) {
+                        cursor += 2;
+                    } else {
+                        if cursor == content_start {
+                            return Err("quoted include path must not be empty");
+                        }
+                        cursor += 1;
+                        return if cursor == range.end {
+                            Ok(())
+                        } else {
+                            Err("quoted include path has trailing tokens")
+                        };
+                    }
+                }
+                b'\r' | b'\n' => return Err("quoted include path must not contain a line break"),
+                _ => cursor += 1,
+            }
+        }
+        Err("unterminated quoted include path")
+    } else if source[range]
+        .iter()
+        .all(|byte| !byte.is_ascii_whitespace() && !matches!(*byte, b'\'' | b'"'))
+    {
+        Ok(())
+    } else {
+        Err("bare include path must be one token")
     }
 }
 
@@ -2458,6 +2548,31 @@ fn append_masked(
         output.len() - range.len()..output.len(),
         source_id,
         range,
+        expansion_id,
+    ));
+    Ok(())
+}
+
+fn append_synthetic(
+    output: &mut Vec<u8>,
+    segments: &mut Vec<SourceMapSegment>,
+    source_id: &ProjectSourceId,
+    expansion_id: ExpansionId,
+    source_len: usize,
+    usage: &mut PreparationUsage,
+    limits: PreparationLimits,
+) -> Result<(), PrepareSourceError> {
+    charge_work(usage, 1, limits, source_id, source_len..source_len)?;
+    append_bytes(
+        output,
+        std::iter::once(b'\n'),
+        1,
+        limits,
+        source_id,
+        source_len..source_len,
+    )?;
+    segments.push(SourceMapSegment::synthetic(
+        output.len() - 1..output.len(),
         expansion_id,
     ));
     Ok(())

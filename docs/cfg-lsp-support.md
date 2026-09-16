@@ -59,12 +59,43 @@ let cfgs = build_file_cfgs_in_project(&snapshot, &ProjectUnitId::from("demo")).u
 assert!(cfgs.is_empty());
 ```
 
+## Configured conditional and include preparation
+
+`prepare_source` evaluates a bounded conditional subset over caller-supplied
+`SourceSnapshot` values and expands explicitly selected `IncludeBinding`
+occurrences. It does not read files, discover search paths, evaluate MSBuild,
+or infer a compiler environment. Its executable rustdoc example demonstrates
+the complete preparation call.
+
+- `PrepareSourceOptions` supplies the configuration ID and initially defined
+  and undefined symbols. Omitted symbols are unknown in a `Partial`
+  environment and false only in an explicitly `Complete` environment.
+- Supported directives include `IFDEF`, `IFNDEF`, boolean `IF`/`ELSEIF`,
+  `ELSE`, `ENDIF`, `DEFINE`, `UNDEF`, and `I`/`INCLUDE`, in both brace and
+  parenthesized-comment spellings. Boolean conditions support `Defined`,
+  `NOT`, `AND`, `OR`, parentheses, `TRUE`, and `FALSE`.
+- Define state flows into and out of nested includes in source order.
+  Include bindings identify original directive spans; they do not authorize
+  filesystem lookup or certify malformed directive syntax.
+- Unknown active conditions, unsupported active directives, missing/cyclic
+  includes, malformed input, and exceeded resource budgets return errors.
+  They never become an apparently empty complete projection.
+- Include return boundaries receive a mapped synthetic line separator when
+  needed, so an include's final token or line comment cannot consume parent
+  code.
+
+Convert the result with `ProjectUnitInput::from_prepared`. Construct project
+`UsesSite` ranges from that prepared tree, not the original source. CFG and
+statement ranges also use prepared coordinates; translate them with the
+retained source map when reporting diagnostics or navigating original files.
+
 ## Prepared source and mapping contract
 
-Configured source preparation is a separate caller-owned layer.  The crate
-does not load include files or evaluate compiler configuration.  A preparer
-must provide immutable [`SourceSnapshot`](../src/source_map.rs) values and an
-ordered [`SourceMap`](../src/source_map.rs) whose segments cover the complete
+Project configuration discovery and include selection remain caller-owned.
+The in-memory helper above constructs the mapping automatically; external
+preparers can instead provide immutable
+[`SourceSnapshot`](../src/source_map.rs) values and an ordered
+[`SourceMap`](../src/source_map.rs) whose segments cover the complete
 prepared buffer.  `Copied` segments must match their original bytes;
 `Masked` segments may contain only whitespace and must preserve line breaks;
 `Synthetic` segments explicitly have no origin.  The `ExpansionId` on each

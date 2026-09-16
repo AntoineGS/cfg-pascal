@@ -1425,3 +1425,54 @@ end.
             && can_reach(mixed, mixed_reraise, block)
     }));
 }
+
+#[test]
+fn matching_import_head_binding_blocks_qualified_unit_lookup() {
+    let (definitions, _, _) = unit(
+        "definitions",
+        "unit Definitions; interface type TError = class constructor Create; end; TOther = class constructor Create; end; TOtherClass = class of TOther; TFactory = class public TError: TOtherClass; end; var Definitions: TFactory; implementation end.",
+    );
+    let (consumer, consumer_tree, source) = unit(
+        "consumer",
+        "unit Consumer; interface uses Definitions; implementation procedure P; begin try raise Definitions.TError.Create; except on TError do HandleError; on TOther do HandleOther; end; end; end.",
+    );
+    let snapshot = ProjectSnapshot::new(
+        vec![consumer, definitions],
+        vec![import(
+            "consumer",
+            &consumer_tree,
+            0,
+            ImportTarget::Loaded(ProjectUnitId::new("definitions")),
+            &["Definitions"],
+        )],
+    )
+    .expect("valid matching-head snapshot");
+    let cfgs = build_file_cfgs_in_project(&snapshot, &ProjectUnitId::new("consumer"))
+        .expect("matching-head project build");
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, &source, "raise", "raise Definitions.TError.Create");
+    let successful = successful_raise_block(cfg, raise);
+
+    assert!(successors(cfg, successful).contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
+fn same_unit_protected_constructor_remains_precise_in_project() {
+    let (consumer, _, source) = unit(
+        "consumer",
+        "unit Consumer; interface type TError = class protected constructor Create; end; TOther = class constructor Create; end; implementation procedure P; begin try raise TError.Create; except on TError do HandleError; on TOther do HandleOther; end; end; end.",
+    );
+    let snapshot = ProjectSnapshot::new(vec![consumer], Vec::new())
+        .expect("valid same-unit protected snapshot");
+    let cfgs = build_file_cfgs_in_project(&snapshot, &ProjectUnitId::new("consumer"))
+        .expect("same-unit protected project build");
+    let cfg = cfg_for(&cfgs, "P");
+    let raise = block_with_stmt(cfg, &source, "raise", "raise TError.Create");
+    let successful = successful_raise_block(cfg, raise);
+    let error = block_with_stmt(cfg, &source, "statement", "HandleError");
+
+    assert_eq!(
+        successors(cfg, successful),
+        vec![(error, EdgeKind::ExceptionThrow)]
+    );
+}

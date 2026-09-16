@@ -600,10 +600,10 @@ impl ExceptionTypeIndex {
     ) -> Option<TypeId> {
         for import in self.visible_imports(unit_key, offset) {
             let prefix_len = if qualified_only {
+                if self.import_can_shadow_qualifier(import, &parts[0]) {
+                    return None;
+                }
                 let Some(prefix_len) = self.qualifier_match(import, parts, unit_key, offset) else {
-                    if self.import_can_shadow_qualifier(import, &parts[0]) {
-                        return None;
-                    }
                     continue;
                 };
                 prefix_len
@@ -2011,14 +2011,12 @@ fn merge_create_member(current: &mut CreateMember, incoming: CreateMember) {
 fn member_visible(visibility: Visibility, defining_unit: &UnitKey, access_unit: &UnitKey) -> bool {
     match visibility {
         Visibility::Default | Visibility::Public | Visibility::Published => true,
-        // Delphi's ordinary private visibility is unit-scoped.  Strict
-        // visibility and protected access require class-context reasoning that
-        // this intentionally conservative index does not model.
-        Visibility::Private => defining_unit == access_unit,
-        Visibility::StrictPrivate
-        | Visibility::Protected
-        | Visibility::StrictProtected
-        | Visibility::Unknown => false,
+        // Delphi's ordinary private and protected visibility is unit-scoped.
+        // Strict visibility and cross-unit protected access require
+        // class-context reasoning that this intentionally conservative index
+        // does not model.
+        Visibility::Private | Visibility::Protected => defining_unit == access_unit,
+        Visibility::StrictPrivate | Visibility::StrictProtected | Visibility::Unknown => false,
     }
 }
 

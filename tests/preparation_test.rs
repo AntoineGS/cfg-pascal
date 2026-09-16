@@ -279,6 +279,61 @@ fn include_eof_line_comment_gets_a_synthetic_separator_before_parent_text() {
 }
 
 #[test]
+fn include_eof_line_comment_separator_handles_cr_lf_crlf_and_no_ending() {
+    let root = b"program Demo; begin {$I body.inc} Writeln('keep'); end.";
+    let root_id = ProjectSourceId::new("root.pas");
+    let included_id = ProjectSourceId::new("body.inc");
+    let include = b"{$I body.inc}";
+    let cases: &[(&str, &[u8], bool)] = &[
+        ("CR-only", b"// included comment\r", true),
+        ("LF", b"// included comment\n", false),
+        ("CRLF", b"// included comment\r\n", false),
+        ("no ending", b"// included comment", true),
+    ];
+
+    for (label, included, expects_synthetic_lf) in cases {
+        let prepared = prepare_source(
+            &root_id,
+            &[
+                source(root_id.as_str(), root),
+                source(included_id.as_str(), included),
+            ],
+            &[IncludeBinding::new(
+                root_id.clone(),
+                directive_range(root, include),
+                included_id.clone(),
+            )],
+            options(),
+        )
+        .unwrap_or_else(|error| panic!("{label} include should prepare: {error:?}"));
+
+        let comment_end = prepared
+            .bytes()
+            .windows(included.len())
+            .position(|window| window == *included)
+            .unwrap_or_else(|| panic!("{label} included comment"))
+            + included.len();
+        if *expects_synthetic_lf {
+            assert_eq!(
+                prepared.bytes().get(comment_end),
+                Some(&b'\n'),
+                "{label} include needs a synthetic LF"
+            );
+            let separator = prepared
+                .map_range(comment_end..comment_end + 1)
+                .unwrap_or_else(|error| panic!("{label} synthetic include separator: {error:?}"));
+            assert_eq!(separator.len(), 1);
+            assert_eq!(separator[0].kind, SourceSegmentKind::Synthetic);
+            assert!(separator[0].original.is_none());
+        }
+        assert!(
+            prepared.tree().root_node().to_sexp().contains("exprCall"),
+            "{label} parent statement must remain parse-visible"
+        );
+    }
+}
+
+#[test]
 fn include_eof_keyword_gets_a_separator_before_parent_expression() {
     let root = b"program Demo; begin {$I body.inc}E.Create; end.";
     let included = b"raise";
@@ -314,13 +369,21 @@ fn include_eof_keyword_gets_a_separator_before_parent_expression() {
 
 #[test]
 fn include_eof_separator_preserves_downstream_missing_import_uncertainty() {
+    assert_downstream_missing_import_uncertainty(b"//comment");
+}
+
+#[test]
+fn include_eof_cr_only_separator_preserves_downstream_missing_import_uncertainty() {
+    assert_downstream_missing_import_uncertainty(b"//comment\r");
+}
+
+fn assert_downstream_missing_import_uncertainty(included: &[u8]) {
     let known =
         b"unit Known; interface type TError = class constructor Create; end; implementation end.";
     let root = br#"unit D; interface uses Known; implementation
 {$I x}uses Missing;
 type TAlias = TError;
 procedure P; begin try raise TAlias.Create; except on Known.TError do Handle; end; end; end."#;
-    let included = b"//comment";
     let root_id = ProjectSourceId::new("root");
     let included_id = ProjectSourceId::new("inc");
     let root_unit_id = ProjectUnitId::new("d");

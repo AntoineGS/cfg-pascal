@@ -1337,7 +1337,7 @@ where
             include_chain.pop();
             if frame.include_depth > 0
                 && output.len() > frame.output_start
-                && !matches!(output.last(), Some(b'\r' | b'\n'))
+                && !matches!(output.last(), Some(b'\n'))
             {
                 append_synthetic(
                     &mut output,

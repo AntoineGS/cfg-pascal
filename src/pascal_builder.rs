@@ -11,7 +11,8 @@ use crate::constructs::{
     raise_may_throw_during_evaluation, raised_exception_type, Flow, LabelBindingId, LoopFrame,
     PendingTransfer, ScopeId, TransferKind,
 };
-use crate::exception_types::{ExceptionTypeFact, ExceptionTypeIndex, TypeMatch};
+use crate::exception_types::{ExceptionTypeFact, ExceptionTypeIndex, TypeMatch, UnitKey};
+use crate::project::{ProjectBuildError, ProjectSnapshot, ProjectUnitId};
 
 /// Build CFGs for all executable routine definitions in a parsed Pascal file.
 ///
@@ -38,28 +39,85 @@ use crate::exception_types::{ExceptionTypeFact, ExceptionTypeIndex, TypeMatch};
 /// No main CFG is emitted for a body-less library, and no unit section CFG is
 /// emitted when the corresponding section is absent.
 ///
-/// Typed exception dispatch is precise only for proven, same-file,
-/// non-generic class constructors and transparent aliases.  Missing or
-/// imported types, unresolved method owners, class/value ambiguity, implicit
-/// `with` members, and preprocessor directives remain conservative exception
+/// Typed exception dispatch is precise only for proven, non-generic class
+/// constructors and transparent aliases. The legacy entrypoint resolves
+/// same-file declarations; [`build_file_cfgs_in_project`] additionally uses
+/// the caller's explicit loaded-unit/import snapshot. Missing or unavailable
+/// imports, unresolved method owners, class/value ambiguity, implicit `with`
+/// members, and preprocessor directives remain conservative exception
 /// alternatives; a preprocessor directive is a file-wide barrier because the
-/// Pascal grammar exposes it as a sibling extra.  Ordinary comments do not
-/// disable same-file resolution.
+/// Pascal grammar exposes it as a sibling extra. Ordinary comments do not
+/// disable resolution.
 ///
 pub fn build_file_cfgs(tree: &tree_sitter::Tree, source: &[u8]) -> Vec<Cfg> {
     let root = tree.root_node();
     let exception_types = ExceptionTypeIndex::build(root, source);
+    let unit_key = ExceptionTypeIndex::singleton_unit_key();
     let mut cfgs = Vec::new();
-    collect_def_proc_cfgs(root, source, None, &exception_types, &mut cfgs);
-    collect_module_cfgs(root, source, &exception_types, &mut cfgs);
+    collect_def_proc_cfgs(root, source, None, &unit_key, &exception_types, &mut cfgs);
+    collect_module_cfgs(root, source, &unit_key, &exception_types, &mut cfgs);
     cfgs.sort_by_key(|cfg| cfg.byte_range.start);
     cfgs
+}
+
+/// Build CFGs for one unit selected from an immutable project snapshot.
+///
+/// The snapshot owns the exact tree/source pair consumed by this call. Import
+/// targets are never inferred from names: callers provide one [`crate::project::ImportBinding`]
+/// per `uses` entry, including the qualifiers that are authorized for that
+/// occurrence. A missing or ambiguous target remains conservative.
+///
+/// ```rust
+/// use cfg_pascal::{
+///     build_file_cfgs_in_project, ProjectSnapshot, ProjectSourceId, ProjectUnitId,
+///     ProjectUnitInput,
+/// };
+/// use tree_sitter::Parser;
+///
+/// let source = b"unit Demo; interface implementation end.";
+/// let mut parser = Parser::new();
+/// parser.set_language(&cfg_pascal::LANGUAGE.into()).unwrap();
+/// let tree = parser.parse(source, None).unwrap();
+/// let input = ProjectUnitInput::new(
+///     ProjectUnitId::from("demo"),
+///     ProjectSourceId::from("demo.pas"),
+///     tree,
+///     source,
+/// );
+/// let snapshot = ProjectSnapshot::new(vec![input], Vec::new()).unwrap();
+/// let cfgs = build_file_cfgs_in_project(&snapshot, &ProjectUnitId::from("demo")).unwrap();
+/// assert!(cfgs.is_empty());
+/// ```
+///
+pub fn build_file_cfgs_in_project(
+    snapshot: &ProjectSnapshot,
+    unit_id: &ProjectUnitId,
+) -> Result<Vec<Cfg>, ProjectBuildError> {
+    let unit = snapshot
+        .unit(unit_id)
+        .ok_or_else(|| ProjectBuildError::UnitNotFound(unit_id.clone()))?;
+    let exception_types = ExceptionTypeIndex::build_project(snapshot);
+    let unit_key = UnitKey::from_project(unit_id);
+    let root = unit.tree().root_node();
+    let mut cfgs = Vec::new();
+    collect_def_proc_cfgs(
+        root,
+        unit.source(),
+        None,
+        &unit_key,
+        &exception_types,
+        &mut cfgs,
+    );
+    collect_module_cfgs(root, unit.source(), &unit_key, &exception_types, &mut cfgs);
+    cfgs.sort_by_key(|cfg| cfg.byte_range.start);
+    Ok(cfgs)
 }
 
 fn collect_def_proc_cfgs(
     node: Node,
     source: &[u8],
     parent_qualified_name: Option<&str>,
+    unit_key: &UnitKey,
     exception_types: &ExceptionTypeIndex,
     out: &mut Vec<Cfg>,
 ) {
@@ -76,7 +134,7 @@ fn collect_def_proc_cfgs(
             .map(|_| qualified_name.clone())
             .unwrap_or(local_name);
 
-        if let Some(cfg) = build_proc_cfg(node, source, proc_name, exception_types) {
+        if let Some(cfg) = build_proc_cfg(node, source, proc_name, unit_key, exception_types) {
             out.push(cfg);
         }
 
@@ -85,14 +143,28 @@ fn collect_def_proc_cfgs(
         // the routine body while collecting descendants, or its statements
         // would be mistaken for part of the containing routine.
         for child in field_children(node, "local") {
-            collect_def_proc_cfgs(child, source, Some(&qualified_name), exception_types, out);
+            collect_def_proc_cfgs(
+                child,
+                source,
+                Some(&qualified_name),
+                unit_key,
+                exception_types,
+                out,
+            );
         }
         return;
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_def_proc_cfgs(child, source, parent_qualified_name, exception_types, out);
+        collect_def_proc_cfgs(
+            child,
+            source,
+            parent_qualified_name,
+            unit_key,
+            exception_types,
+            out,
+        );
     }
 }
 
@@ -101,6 +173,7 @@ fn build_proc_cfg(
     def_proc: Node,
     source: &[u8],
     proc_name: String,
+    unit_key: &UnitKey,
     exception_types: &ExceptionTypeIndex,
 ) -> Option<Cfg> {
     let block = def_proc.child_by_field_name("body")?;
@@ -112,6 +185,7 @@ fn build_proc_cfg(
         block,
         ScopeBody::Block,
         source,
+        unit_key,
         exception_types,
     ))
 }
@@ -119,6 +193,7 @@ fn build_proc_cfg(
 fn collect_module_cfgs(
     node: Node,
     source: &[u8],
+    unit_key: &UnitKey,
     exception_types: &ExceptionTypeIndex,
     out: &mut Vec<Cfg>,
 ) {
@@ -138,6 +213,7 @@ fn collect_module_cfgs(
                     body,
                     ScopeBody::Block,
                     source,
+                    unit_key,
                     exception_types,
                 ));
             }
@@ -153,6 +229,7 @@ fn collect_module_cfgs(
                             section,
                             ScopeBody::Section,
                             source,
+                            unit_key,
                             exception_types,
                         ));
                     }
@@ -163,6 +240,7 @@ fn collect_module_cfgs(
                             section,
                             ScopeBody::Block,
                             source,
+                            unit_key,
                             exception_types,
                         ));
                     }
@@ -211,6 +289,7 @@ fn build_scope_cfg(
     scope_node: Node,
     scope_body: ScopeBody,
     source: &[u8],
+    unit_key: &UnitKey,
     exception_types: &ExceptionTypeIndex,
 ) -> Cfg {
     let mut builder = DefaultCfgBuilder::new(scope_name, byte_range);
@@ -252,6 +331,7 @@ fn build_scope_cfg(
         builder: &mut builder,
         exit,
         source,
+        unit_key,
         exception_types,
         loop_stack: Vec::new(),
         cleanup_scopes: Vec::new(),
@@ -483,6 +563,7 @@ struct BuildContext<'a> {
     builder: &'a mut DefaultCfgBuilder,
     exit: BlockId,
     source: &'a [u8],
+    unit_key: &'a UnitKey,
     exception_types: &'a ExceptionTypeIndex,
     loop_stack: Vec<LoopFrame>,
     cleanup_scopes: Vec<ScopeId>,
@@ -1379,7 +1460,8 @@ fn process_single_stmt(ctx: &mut BuildContext<'_>, child: Node, current: BlockId
                     .copied()
                     .unwrap_or(ExceptionTypeFact::Unknown)
             } else {
-                ctx.exception_types.raised_fact(child, ctx.source)
+                ctx.exception_types
+                    .raised_fact(ctx.unit_key, child, ctx.source)
             };
             let mut transfers = Vec::new();
             if raise_may_throw_during_evaluation(child, ctx.source) {
@@ -2108,7 +2190,8 @@ fn build_except_handlers(
             "exceptionHandler" => (
                 new_block(ctx, BasicBlockKind::ExceptHandler),
                 false,
-                ctx.exception_types.handler_fact(child, ctx.source),
+                ctx.exception_types
+                    .handler_fact(ctx.unit_key, child, ctx.source),
             ),
             "exceptionElse" | "statements" => (
                 new_block(ctx, BasicBlockKind::BareExceptHandler),

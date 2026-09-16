@@ -633,3 +633,141 @@ end.
     assert!(raise_successors.contains(&(other, EdgeKind::ExceptionThrow)));
     assert!(raise_successors.contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
 }
+
+#[test]
+fn class_var_create_members_do_not_inherit_constructor_facts() {
+    let source = br#"
+unit ClassVarCreateMember;
+interface
+implementation
+
+type
+  TOther = class
+    constructor Create;
+  end;
+  TBase = class
+    constructor Create;
+  end;
+  TError = class(TBase)
+  public
+    class var Create: TOther;
+  end;
+
+procedure ClassVarCreateMember;
+begin
+  try
+    raise TError.Create;
+  except
+    on E: TError do
+      HandleError;
+    on E: TOther do
+      HandleOther;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "ClassVarCreateMember");
+    let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise TError.Create");
+    let other = block_with_stmt(cfg, &source, "statement", "HandleOther");
+    let successful_raise = successful_raise_block(cfg, raise_stmt);
+
+    assert!(successors(cfg, successful_raise).contains(&(other, EdgeKind::ExceptionThrow)));
+    assert!(successors(cfg, successful_raise).contains(&(cfg.exit, EdgeKind::ExceptionThrow)));
+}
+
+#[test]
+fn same_unit_private_constructor_remains_precise() {
+    let source = br#"
+unit SameUnitPrivateConstructor;
+interface
+implementation
+
+type
+  TError = class
+  private
+    constructor Create;
+  end;
+  TOther = class
+    constructor Create;
+  end;
+
+procedure SameUnitPrivateConstructor;
+begin
+  try
+    raise TError.Create;
+  except
+    on E: TError do
+      HandleError;
+    on E: TOther do
+      HandleOther;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "SameUnitPrivateConstructor");
+    let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise TError.Create");
+    let error = block_with_stmt(cfg, &source, "statement", "HandleError");
+    let successful_raise = successful_raise_block(cfg, raise_stmt);
+
+    assert_eq!(
+        successors(cfg, successful_raise),
+        vec![(error, EdgeKind::ExceptionThrow)]
+    );
+}
+
+#[test]
+fn nested_alias_uses_its_declaration_offset() {
+    let source = br#"
+unit NestedAliasDeclarationOffset;
+interface
+implementation
+
+type
+  TError = class
+    constructor Create;
+  end;
+  TOther = class
+    constructor Create;
+  end;
+  THost = class
+  public
+    type
+      TAlias = TError;
+      TError = TOther;
+  end;
+
+procedure NestedAliasOffsetProc;
+begin
+  try
+    raise THost.TAlias.Create;
+  except
+    on E: NestedAliasDeclarationOffset.TError do
+      HandleError;
+    on E: NestedAliasDeclarationOffset.TOther do
+      HandleOther;
+  end;
+end;
+
+end.
+"#
+    .to_vec();
+    let tree = parse_clean(&source);
+    let cfgs = build_file_cfgs(&tree, &source);
+    let cfg = cfg_for(&cfgs, "NestedAliasOffsetProc");
+    let raise_stmt = block_with_stmt(cfg, &source, "raise", "raise THost.TAlias.Create");
+    let error = block_with_stmt(cfg, &source, "statement", "HandleError");
+    let successful_raise = successful_raise_block(cfg, raise_stmt);
+
+    assert_eq!(
+        successors(cfg, successful_raise),
+        vec![(error, EdgeKind::ExceptionThrow)]
+    );
+}

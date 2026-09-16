@@ -78,12 +78,16 @@ into one file.
 `PreparedSource::new` is intentionally strict: the caller must mark the
 projection as `PreparationFidelity::Complete`, provide a configuration ID and
 provenance, and the prepared bytes must parse cleanly with this crate's
-`LANGUAGE`.  `Unresolved`, `Lossy`, and `Incomplete` preparation is rejected;
-the raw `build_file_cfgs`/`ProjectUnitInput::new` APIs remain available and
-conservative.  The absence of preprocessor nodes is never treated as proof of
-completeness.  The `PreparedSource::identity` convenience path is narrower: it
-rejects any preprocessor node, including an unresolved include, instead of
-auto-claiming `Complete`; configured projections must use `PreparedSource::new`.
+`LANGUAGE` without any preprocessor nodes.  `Unresolved`, `Lossy`, and
+`Incomplete` preparation is rejected; `Complete` is an explicit caller
+assertion, not permission to leave an unresolved include or other directive in
+the prepared bytes.  `PreparedSource::from_segments` and the
+`PreparedSource::identity` convenience path enforce the same check.  The raw
+`build_file_cfgs`/`ProjectUnitInput::new` APIs remain available and
+conservative.  Callers with configured source must resolve or mask every
+directive first, typically through `prepare_source`; raw source that still
+contains directives must use the raw APIs rather than claim a precise
+prepared CFG.
 
 The executable rustdoc example on `PreparedSource::new` shows the full
 construction path:

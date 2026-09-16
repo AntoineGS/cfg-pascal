@@ -563,7 +563,7 @@ fn identity_rejects_unresolved_preprocessor_content_instead_of_claiming_complete
         &error,
         cfg_pascal::PreparedSourceError::UnresolvedPreprocessor { .. }
     ));
-    assert!(error.to_string().contains("raw identity preparation"));
+    assert!(error.to_string().contains("strict prepared source"));
 
     let raw_tree = parse_clean(source);
     assert!(!build_file_cfgs(&raw_tree, source).is_empty());
@@ -606,6 +606,84 @@ fn identity_rejects_unresolved_preprocessor_content_instead_of_claiming_complete
         directive_like_string.provenance(),
         PreparationProvenance::Raw
     );
+}
+
+#[test]
+fn every_strict_prepared_constructor_rejects_preprocessor_nodes_but_not_literals_or_comments() {
+    let unresolved = [
+        (
+            "brace-include.pas",
+            b"program Brace; begin {$I body.inc} end.".as_slice(),
+        ),
+        (
+            "paren-include.pas",
+            b"program Paren; begin (*$I body.inc*) end.".as_slice(),
+        ),
+        (
+            "nested-include.pas",
+            b"program Nested; {$IF TRUE} (*$I body.inc*) {$ENDIF} begin end.".as_slice(),
+        ),
+    ];
+
+    for (source_id, bytes) in unresolved {
+        let snapshot = source(source_id, bytes);
+        let map = SourceMap::identity(snapshot.clone()).expect("identity source map");
+        let new_result = PreparedSource::new(
+            ProjectSourceId::new(format!("{source_id}.prepared")),
+            bytes,
+            map,
+            "debug",
+            PreparationFidelity::Complete,
+            PreparationProvenance::Configured,
+        );
+        assert!(
+            matches!(
+                new_result,
+                Err(cfg_pascal::PreparedSourceError::UnresolvedPreprocessor { .. })
+            ),
+            "new accepted unresolved preprocessor content from {source_id}"
+        );
+
+        let from_segments_result = PreparedSource::from_segments(
+            ProjectSourceId::new(format!("{source_id}.prepared")),
+            bytes,
+            vec![snapshot],
+            vec![copied(0..bytes.len(), source_id, 0..bytes.len(), "root")],
+            "debug",
+            PreparationFidelity::Complete,
+            PreparationProvenance::Configured,
+        );
+        assert!(
+            matches!(
+                from_segments_result,
+                Err(cfg_pascal::PreparedSourceError::UnresolvedPreprocessor { .. })
+            ),
+            "from_segments accepted unresolved preprocessor content from {source_id}"
+        );
+    }
+
+    let clean = b"program Clean; begin WriteLn('{$I body.inc}'); (* ordinary comment *) end.";
+    let snapshot = source("clean.pas", clean);
+    let map = SourceMap::identity(snapshot.clone()).expect("clean identity source map");
+    PreparedSource::new(
+        ProjectSourceId::new("clean.prepared"),
+        clean,
+        map,
+        "debug",
+        PreparationFidelity::Complete,
+        PreparationProvenance::Configured,
+    )
+    .expect("directive-like strings and ordinary comments are not preprocessor nodes");
+    PreparedSource::from_segments(
+        ProjectSourceId::new("clean.prepared"),
+        clean,
+        vec![snapshot],
+        vec![copied(0..clean.len(), "clean.pas", 0..clean.len(), "root")],
+        "debug",
+        PreparationFidelity::Complete,
+        PreparationProvenance::Configured,
+    )
+    .expect("from_segments preserves the same clean-input policy");
 }
 
 #[test]

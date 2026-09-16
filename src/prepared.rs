@@ -87,10 +87,10 @@ pub enum PreparedSourceError {
     ParserReturnedNoTree,
     /// The prepared bytes produced a tree containing parser errors.
     ParserErrors { range: Range<usize> },
-    /// The raw identity convenience path found an unresolved preprocessor
-    /// node.  Callers that have resolved the directive must use
-    /// [`PreparedSource::new`] with the resulting prepared bytes and source
-    /// map instead.
+    /// A strict prepared-source constructor found an unresolved preprocessor
+    /// node.  Callers that have resolved the directive must provide the
+    /// resulting prepared bytes and source map instead, or retain the source
+    /// as a raw [`ProjectUnitInput`](crate::ProjectUnitInput).
     UnresolvedPreprocessor {
         /// Byte range of the first preprocessor node.
         range: Range<usize>,
@@ -133,7 +133,7 @@ impl fmt::Display for PreparedSourceError {
             }
             Self::UnresolvedPreprocessor { range, node_kind } => write!(
                 formatter,
-                "raw identity preparation cannot claim completeness for {node_kind:?} in {range:?}"
+                "strict prepared source cannot claim completeness for {node_kind:?} in {range:?}"
             ),
         }
     }
@@ -178,8 +178,11 @@ impl PreparedSource {
     /// The parser always uses [`crate::LANGUAGE`].  A source map must already
     /// be validated against the exact same prepared bytes; both its length
     /// and bytes are checked again here.  Only [`PreparationFidelity::Complete`]
-    /// is accepted, so missing or lossy executable content cannot become an
-    /// apparently empty include or a precise CFG by accident.
+    /// is accepted, and the bytes must contain no preprocessor nodes, so
+    /// missing or lossy executable content cannot become an apparently empty
+    /// include or a precise CFG by accident.  `Complete` is an explicit
+    /// caller assertion, not permission to leave an unresolved include or
+    /// other preprocessor directive in the prepared bytes.
     ///
     /// ```rust
     /// use cfg_pascal::{
@@ -236,19 +239,7 @@ impl PreparedSource {
             return Err(PreparedSourceError::PreparedBytesMismatch);
         }
 
-        let mut parser = Parser::new();
-        parser
-            .set_language(&crate::LANGUAGE.into())
-            .map_err(|_| PreparedSourceError::ParserReturnedNoTree)?;
-        let tree = parser
-            .parse(prepared_bytes, None)
-            .ok_or(PreparedSourceError::ParserReturnedNoTree)?;
-        let root = tree.root_node();
-        if root.has_error() {
-            return Err(PreparedSourceError::ParserErrors {
-                range: root.start_byte()..root.end_byte(),
-            });
-        }
+        let tree = parse_strict_clean(prepared_bytes)?;
 
         Ok(Self {
             source_id,
@@ -263,6 +254,8 @@ impl PreparedSource {
 
     /// Build a prepared source directly from original snapshots and ordered
     /// segments.  This is the intended seam for a future pure configurator.
+    /// It has the same strict parser and preprocessor-node checks as
+    /// [`Self::new`].
     pub fn from_segments(
         source_id: ProjectSourceId,
         prepared_bytes: impl AsRef<[u8]>,
@@ -289,17 +282,13 @@ impl PreparedSource {
     /// any preprocessor nodes.  An unresolved include or conditional directive
     /// is rejected rather than being silently treated as complete.  Callers
     /// with a resolved configuration should use [`Self::new`] and provide the
-    /// prepared bytes and source map explicitly.
+    /// prepared bytes and source map explicitly; the same rule is enforced by
+    /// every strict prepared-source constructor.
     pub fn identity(
         source_id: ProjectSourceId,
         bytes: impl AsRef<[u8]>,
         configuration_id: impl Into<String>,
     ) -> Result<Self, PreparedSourceError> {
-        let bytes_ref = bytes.as_ref();
-        let tree = parse_clean(bytes_ref)?;
-        if let Some((range, node_kind)) = first_preprocessor_node(tree.root_node(), bytes_ref) {
-            return Err(PreparedSourceError::UnresolvedPreprocessor { range, node_kind });
-        }
         let snapshot = SourceSnapshot::new(source_id.clone(), bytes.as_ref());
         let source_map = SourceMap::identity(snapshot)?;
         Self::new(
@@ -383,7 +372,7 @@ impl PreparedSource {
     }
 }
 
-fn parse_clean(bytes: &[u8]) -> Result<Tree, PreparedSourceError> {
+fn parse_strict_clean(bytes: &[u8]) -> Result<Tree, PreparedSourceError> {
     let mut parser = Parser::new();
     parser
         .set_language(&crate::LANGUAGE.into())
@@ -396,6 +385,9 @@ fn parse_clean(bytes: &[u8]) -> Result<Tree, PreparedSourceError> {
         return Err(PreparedSourceError::ParserErrors {
             range: root.start_byte()..root.end_byte(),
         });
+    }
+    if let Some((range, node_kind)) = first_preprocessor_node(root, bytes) {
+        return Err(PreparedSourceError::UnresolvedPreprocessor { range, node_kind });
     }
     Ok(tree)
 }
